@@ -968,9 +968,9 @@ void InklingApp::libraryScreen(UiApp::ScreenType& screen, void* user) {
         sysBadge = "COMPAGNO PET";
         sysIcon = Icon::Crystal;
       } else if (sysIdx == 1) {
-        sysTitle = "Hacker Matrix: Breach";
-        sysSub = "Infiltrazione neurale cyberpunk · Ruba i Data-Core e vinci Cristalli";
-        sysBadge = "CYBER GAME";
+        sysTitle = "GIOCO: Hacker Matrix Breach";
+        sysSub = "Gioca sullo schermo X3 · Ruba i Data-Core, evita gli ICE e usa l'EMP!";
+        sysBadge = "GIOCO LOCALE X3";
         sysIcon = Icon::Flame;
       } else if (sysIdx == 2) {
         sysTitle = "Diagnostica & Giroscopio IMU";
@@ -978,9 +978,9 @@ void InklingApp::libraryScreen(UiApp::ScreenType& screen, void* user) {
         sysBadge = "TELEMETRIA";
         sysIcon = Icon::Compass;
       } else {
-        sysTitle = "Cyber-Net Wi-Fi & Daily Ink";
-        sysSub = "Scarica Giornale ANSA/Tech · Portale Web Carica Libri · OTA";
-        sysBadge = "CYBER-NET HUB";
+        sysTitle = "Giornale Wi-Fi (ANSA) & Upload Libri";
+        sysSub = "Scarica il Giornale Quotidiano ANSA o invia libri dal browser";
+        sysBadge = "WI-FI & NOTIZIE";
         sysIcon = Icon::Wifi;
       }
 

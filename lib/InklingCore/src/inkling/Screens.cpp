@@ -315,25 +315,25 @@ void otaScreen(UiApp::ScreenType& screen, void* user) {
   fastStroke(t, guide, Paint::solid(Color::Black), 2, 8);
   const Rect guideHdr{40, 388, static_cast<int16_t>(w - 80), 34};
   fastFill(t, guideHdr, Paint::solid(Color::Black), 6);
-  drawText(t, Rect{54, 391, static_cast<int16_t>(w - 108), 28}, "FUNZIONI WI-FI INTEGRATE", kFontSmall, Color::White);
+  drawText(t, Rect{54, 391, static_cast<int16_t>(w - 108), 28}, "GUIDA RAPIDA WI-FI", kFontSmall, Color::White);
 
   drawIcon16(t, 54, 438, Icon::Book, Color::Black);
-  drawText(t, Rect{78, 432, static_cast<int16_t>(w - 130), 26}, "1. DAILY INK BRIEFING (Tasto OK)", kFontBody,
+  drawText(t, Rect{78, 432, static_cast<int16_t>(w - 130), 26}, "1. SCARICA GIORNALE (Premi OK sull'X3)", kFontBody,
            Color::Black);
   drawText(t, Rect{78, 458, static_cast<int16_t>(w - 130), 24},
-           "Scarica ANSA Top News + Tech + HackerNews come libro", kFontSmall, Color::Black);
+           "Crea il libro quotidiano ANSA Italia + Mondo + Tecnologia", kFontSmall, Color::Black);
 
   drawIcon16(t, 54, 502, Icon::Spark, Color::Black);
-  drawText(t, Rect{78, 496, static_cast<int16_t>(w - 130), 26}, "2. CYBER-DECK WEB PORTAL (Browser)", kFontBody,
-           Color::Black);
+  drawText(t, Rect{78, 496, static_cast<int16_t>(w - 130), 26}, "2. CARICA LIBRI SENZA FILI (Da Telefono/Mac)",
+           kFontBody, Color::Black);
   drawText(t, Rect{78, 522, static_cast<int16_t>(w - 130), 24},
-           "Carica EPUB/TXT/MD senza fili e invia Note Second Brain", kFontSmall, Color::Black);
+           "Apri l'indirizzo http:// qui sopra per inviare EPUB o Note", kFontSmall, Color::Black);
 
   drawIcon16(t, 54, 566, Icon::Compass, Color::Black);
-  drawText(t, Rect{78, 560, static_cast<int16_t>(w - 130), 26}, "3. CLOCK SYNC & OTA FIRMWARE", kFontBody,
+  drawText(t, Rect{78, 560, static_cast<int16_t>(w - 130), 26}, "3. GIOCO HACKER BREACH (Locale su X3)", kFontBody,
            Color::Black);
   drawText(t, Rect{78, 586, static_cast<int16_t>(w - 130), 24},
-           "Orologio RTC sincronizzato via NTP · Mac: scripts/ota.sh", kFontSmall, Color::Black);
+           "Premi BACK: trovi il gioco nel Santuario Pet o in Libreria!", kFontSmall, Color::Black);
 
   char verLine[64];
   snprintf(verLine, sizeof(verLine), "Build: %s · http://inkling.local",

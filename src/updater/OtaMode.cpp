@@ -302,155 +302,207 @@ bool extractTagSpan(const char* start, const char* limit, const char* openTag, c
   return true;
 }
 
-int fetchAndWriteRssSection(FsFile& outFile, const char* sectionTitle, const char* url, int maxItems,
-                            bool includeDescription, char* xmlBuf, size_t xmlCap) {
+int fetchAndWriteRssSection(const char* sectionTitle, const char* url, int maxItems, char* xmlBuf, size_t xmlCap,
+                            char* outMdBuf, size_t outMdCap) {
+  size_t mdLen = 0;
+  auto appendMd = [&](const char* s) {
+    const size_t n = strlen(s);
+    if (mdLen + n + 1 < outMdCap) {
+      memcpy(outMdBuf + mdLen, s, n);
+      mdLen += n;
+      outMdBuf[mdLen] = '\0';
+    }
+  };
+
   char hdr[160];
   snprintf(hdr, sizeof(hdr), "\n# %s\n\n", sectionTitle);
-  outFile.write(hdr, strlen(hdr));
+  outMdBuf[0] = '\0';
+  appendMd(hdr);
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setConnectTimeout(4500);
-  http.setTimeout(6500);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setUserAgent("InklingOS-XteinkX3/2.0");
-
-  if (!http.begin(client, url)) {
-    const char* err = "Impossibile inizializzare connessione HTTPS.\n\n";
-    outFile.write(err, strlen(err));
-    return 0;
-  }
-  const int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    LOG("briefing: GET %s -> %d", url, code);
-    http.end();
-    const char* err = "Feed temporaneamente non raggiungibile.\n\n";
-    outFile.write(err, strlen(err));
-    return 0;
-  }
-
-  WiFiClient* stream = http.getStreamPtr();
   size_t totalRead = 0;
-  const unsigned long t0 = millis();
-  while ((http.connected() || (stream && stream->available())) && totalRead + 1 < xmlCap &&
-         millis() - t0 < 7500) {
-    const int avail = stream ? stream->available() : 0;
-    if (avail > 0) {
-      const size_t toRead = static_cast<size_t>(avail) < (xmlCap - 1 - totalRead)
-                                ? static_cast<size_t>(avail)
-                                : (xmlCap - 1 - totalRead);
-      const int n = stream->readBytes(xmlBuf + totalRead, toRead);
-      if (n > 0) totalRead += static_cast<size_t>(n);
-    } else {
-      delay(5);
+  int httpCode = 0;
+  {
+    // Scope WiFiClientSecure & HTTPClient so all ~40 KB of mbedTLS buffers are
+    // completely freed as soon as the HTTP response is read.
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(4);
+    HTTPClient http;
+    http.setConnectTimeout(3500);
+    http.setTimeout(4000);
+    http.useHTTP10(true);  // Avoid chunked encoding & keep-alive stalls!
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setUserAgent("InklingOS-XteinkX3/2.0");
+
+    if (!http.begin(client, url)) {
+      appendMd("Impossibile inizializzare connessione HTTPS.\n\n");
+      goto write_sd;
     }
+    httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+      LOG("briefing: GET %s -> %d", url, httpCode);
+      http.end();
+      appendMd("Feed temporaneamente non raggiungibile.\n\n");
+      goto write_sd;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    const unsigned long t0 = millis();
+    while (stream && (stream->connected() || stream->available()) && totalRead + 1 < xmlCap &&
+           millis() - t0 < 4500) {
+      const int avail = stream->available();
+      if (avail > 0) {
+        const size_t rem = xmlCap - 1 - totalRead;
+        const size_t toRead = static_cast<size_t>(avail) < rem ? static_cast<size_t>(avail) : rem;
+        const int n = stream->readBytes(xmlBuf + totalRead, toRead);
+        if (n > 0) totalRead += static_cast<size_t>(n);
+      } else {
+        delay(5);
+      }
+    }
+    xmlBuf[totalRead] = '\0';
+    http.end();
   }
-  xmlBuf[totalRead] = '\0';
-  http.end();
 
-  char titleBuf[320];
-  char descBuf[640];
-  char lineBuf[1080];
-  int count = 0;
-  const char* cursor = xmlBuf;
-  const char* xmlEnd = xmlBuf + totalRead;
+  {
+    char titleBuf[280];
+    char descBuf[520];
+    char lineBuf[900];
+    int count = 0;
+    const char* cursor = xmlBuf;
+    const char* xmlEnd = xmlBuf + totalRead;
 
-  while (count < maxItems && cursor < xmlEnd) {
-    const char* itemStart = strstr(cursor, "<item");
-    if (!itemStart || itemStart >= xmlEnd) break;
-    const char* itemEnd = strstr(itemStart, "</item>");
-    if (!itemEnd || itemEnd > xmlEnd) break;
+    while (count < maxItems && cursor < xmlEnd) {
+      const char* itemStart = strstr(cursor, "<item");
+      if (!itemStart || itemStart >= xmlEnd) break;
+      const char* itemEnd = strstr(itemStart, "</item>");
+      if (!itemEnd || itemEnd > xmlEnd) break;
 
-    const char* rawT = nullptr;
-    size_t rawTLen = 0;
-    if (extractTagSpan(itemStart, itemEnd, "<title>", "</title>", &rawT, &rawTLen)) {
-      cleanXmlText(rawT, rawTLen, titleBuf, sizeof(titleBuf));
-      if (titleBuf[0] != '\0') {
-        ++count;
-        descBuf[0] = '\0';
-        if (includeDescription) {
+      const char* rawT = nullptr;
+      size_t rawTLen = 0;
+      if (extractTagSpan(itemStart, itemEnd, "<title>", "</title>", &rawT, &rawTLen)) {
+        cleanXmlText(rawT, rawTLen, titleBuf, sizeof(titleBuf));
+        if (titleBuf[0] != '\0') {
+          ++count;
+          descBuf[0] = '\0';
           const char* rawD = nullptr;
           size_t rawDLen = 0;
           if (extractTagSpan(itemStart, itemEnd, "<description>", "</description>", &rawD, &rawDLen)) {
             cleanXmlText(rawD, rawDLen, descBuf, sizeof(descBuf));
           }
+          if (descBuf[0] != '\0' && strcmp(descBuf, titleBuf) != 0) {
+            snprintf(lineBuf, sizeof(lineBuf), "## %d. %s\n\n%s\n\n", count, titleBuf, descBuf);
+          } else {
+            snprintf(lineBuf, sizeof(lineBuf), "## %d. %s\n\n", count, titleBuf);
+          }
+          appendMd(lineBuf);
         }
-        if (descBuf[0] != '\0' && strcmp(descBuf, titleBuf) != 0) {
-          snprintf(lineBuf, sizeof(lineBuf), "## %d. %s\n\n%s\n\n", count, titleBuf, descBuf);
-        } else {
-          snprintf(lineBuf, sizeof(lineBuf), "## %d. %s\n\n", count, titleBuf);
-        }
-        outFile.write(lineBuf, strlen(lineBuf));
+      }
+      cursor = itemEnd + 7;
+    }
+    LOG("briefing: %s -> %d items (%u bytes XML)", sectionTitle, count, static_cast<unsigned>(totalRead));
+    {
+      SpiLock lock;
+      FsFile outFile = SdMan.open(kBriefingPath, O_WRONLY | O_CREAT | O_APPEND);
+      if (outFile) {
+        outFile.write(outMdBuf, mdLen);
+        outFile.close();
       }
     }
-    cursor = itemEnd + 7;
+    return count;
   }
-  LOG("briefing: %s -> %d items (%u bytes XML)", sectionTitle, count, static_cast<unsigned>(totalRead));
-  return count;
+
+write_sd:
+  {
+    SpiLock lock;
+    FsFile outFile = SdMan.open(kBriefingPath, O_WRONLY | O_CREAT | O_APPEND);
+    if (outFile) {
+      outFile.write(outMdBuf, mdLen);
+      outFile.close();
+    }
+  }
+  return 0;
 }
 
 bool generateDailyBriefing(inkling::OtaView& view, const Hooks& hooks) {
-  SpiLock lock;
-  constexpr size_t kXmlCap = 45056;
+  // Keep buffers compact (28 KB XML + 8 KB Markdown) so WiFiClientSecure always
+  // has >55 KB of contiguous heap for mbedTLS handshakes.
+  constexpr size_t kXmlCap = 28672;
+  constexpr size_t kMdCap = 8192;
   char* xmlBuf = static_cast<char*>(malloc(kXmlCap));
-  if (!xmlBuf) {
+  char* mdBuf = static_cast<char*>(malloc(kMdCap));
+  if (!xmlBuf || !mdBuf) {
+    if (xmlBuf) free(xmlBuf);
+    if (mdBuf) free(mdBuf);
     snprintf(statusNotice, sizeof(statusNotice), "Memoria insufficiente per Daily Ink");
     return false;
   }
 
   auto showStep = [&](const char* msg, int8_t pct) {
+    SpiLock lock;
     view.state = msg;
     view.progress = pct;
     hooks.show(view, hooks.user);
   };
 
-  showStep("Daily Ink: ANSA Prima Pagina...", 15);
+  showStep("1/3 Scarico ANSA Prima Pagina...", 20);
 
-  FsFile f = SdMan.open(kBriefingPath, O_WRONLY | O_CREAT | O_TRUNC);
-  if (!f) {
-    free(xmlBuf);
-    snprintf(statusNotice, sizeof(statusNotice), "Errore scrittura su scheda SD");
-    return false;
+  {
+    SpiLock lock;
+    FsFile f = SdMan.open(kBriefingPath, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!f) {
+      free(xmlBuf);
+      free(mdBuf);
+      snprintf(statusNotice, sizeof(statusNotice), "Errore scrittura su scheda SD");
+      return false;
+    }
+    struct tm ti {};
+    char dateLine[180];
+    if (getLocalTime(&ti, 200) && (ti.tm_year + 1900) >= 2025) {
+      snprintf(dateLine, sizeof(dateLine),
+               "# DAILY INK BRIEFING\n\n> Edizione E-Ink del %02d/%02d/%04d ore %02d:%02d — Scaricata via Wi-Fi su Xteink X3.\n\n",
+               ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900, ti.tm_hour, ti.tm_min);
+    } else {
+      snprintf(dateLine, sizeof(dateLine),
+               "# DAILY INK BRIEFING\n\n> Edizione E-Ink Quotidiana — Scaricata via Wi-Fi su Xteink X3.\n\n");
+    }
+    f.write(dateLine, strlen(dateLine));
+    f.close();
   }
-
-  struct tm ti {};
-  char dateLine[160];
-  if (getLocalTime(&ti, 200) && (ti.tm_year + 1900) >= 2025) {
-    snprintf(dateLine, sizeof(dateLine),
-             "# DAILY INK BRIEFING\n\n> Edizione E-Ink del %02d/%02d/%04d ore %02d:%02d — Generata via Cyber-Net Wi-Fi per Xteink X3.\n\n",
-             ti.tm_mday, ti.tm_mon + 1, ti.tm_year + 1900, ti.tm_hour, ti.tm_min);
-  } else {
-    snprintf(dateLine, sizeof(dateLine),
-             "# DAILY INK BRIEFING\n\n> Edizione E-Ink Quotidiana — Generata via Cyber-Net Wi-Fi per Xteink X3.\n\n");
-  }
-  f.write(dateLine, strlen(dateLine));
 
   int totalArticles = 0;
   totalArticles += fetchAndWriteRssSection(
-      f, "PRIMA PAGINA ITALIA (ANSA)", "https://www.ansa.it/sito/notizie/topnews/topnews_rss.xml", 12, true, xmlBuf,
-      kXmlCap);
+      "PRIMA PAGINA ITALIA (ANSA)", "https://www.ansa.it/sito/notizie/topnews/topnews_rss.xml", 10, xmlBuf, kXmlCap,
+      mdBuf, kMdCap);
 
-  showStep("Daily Ink: ANSA Tecnologia...", 50);
+  showStep("2/3 Scarico ANSA Mondo & Esteri...", 55);
   totalArticles += fetchAndWriteRssSection(
-      f, "TECNOLOGIA & SCIENZA (ANSA)", "https://www.ansa.it/sito/notizie/tecnologia/tecnologia_rss.xml", 10, true,
-      xmlBuf, kXmlCap);
+      "MONDO & ESTERI (ANSA)", "https://www.ansa.it/sito/notizie/mondo/mondo_rss.xml", 8, xmlBuf, kXmlCap, mdBuf,
+      kMdCap);
 
-  showStep("Daily Ink: Hacker News Radar...", 80);
+  showStep("3/3 Scarico ANSA Tecnologia...", 85);
   totalArticles += fetchAndWriteRssSection(
-      f, "HACKER NEWS // SILICON VALLEY", "https://hnrss.org/frontpage?count=10&description=0", 10, false, xmlBuf,
-      kXmlCap);
+      "TECNOLOGIA & SCIENZA (ANSA)", "https://www.ansa.it/sito/notizie/tecnologia/tecnologia_rss.xml", 8, xmlBuf,
+      kXmlCap, mdBuf, kMdCap);
 
-  const char* footer = "\n> Fine edizione Daily Ink Briefing. Premi OK nel Lettore per attivare Lettura Veloce Bionic!\n";
-  f.write(footer, strlen(footer));
-  f.close();
   free(xmlBuf);
+  free(mdBuf);
 
-  setActiveBookOnSd(kBriefingPath);
-  snprintf(statusNotice, sizeof(statusNotice), "Daily Ink pronto! (%d notizie)", totalArticles);
-  view.state = statusNotice;
-  view.progress = -1;
-  hooks.show(view, hooks.user);
+  {
+    SpiLock lock;
+    FsFile f = SdMan.open(kBriefingPath, O_WRONLY | O_CREAT | O_APPEND);
+    if (f) {
+      const char* footer =
+          "\n> Fine edizione Daily Ink Briefing. Premi BACK per tornare al Lettore e leggere il giornale!\n";
+      f.write(footer, strlen(footer));
+      f.close();
+    }
+    setActiveBookOnSd(kBriefingPath);
+    snprintf(statusNotice, sizeof(statusNotice), "Giornale pronto! (%d notizie) Premi BACK", totalArticles);
+    view.state = statusNotice;
+    view.progress = 100;
+    hooks.show(view, hooks.user);
+  }
   return totalArticles > 0;
 }
 
@@ -1036,7 +1088,10 @@ void run(const Config& config, const Hooks& hooks) {
     if (briefingPending || (hooks.confirmPressed && hooks.confirmPressed(hooks.user))) {
       briefingPending = false;
       lastActivityMs = millis();
-      generateDailyBriefing(view, hooks);
+      if (generateDailyBriefing(view, hooks)) {
+        delay(600);
+        leaveToReaderPending = true;
+      }
       snprintf(lastShownNotice, sizeof(lastShownNotice), "%s", statusNotice);
     }
 
