@@ -102,6 +102,7 @@ BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
     BookStatus st = catalog_.open(*source_, *cache_, catalogArena_, scratch_);
     if (st != BookStatus::Ok && st != BookStatus::OutOfMemory) {
       // First open (or the file changed): index the container once.
+      INKLING_LOG("catalog: building (%s)", freeink::book::bookStatusName(st));
       scratch_.reset();
       parse_.reset();
       parseUsed_ = parse_.capacity() > 0;
@@ -155,6 +156,7 @@ void BookReader::close() {
 }
 
 BookStatus BookReader::layoutChapter(const char* cacheName) {
+  INKLING_LOG("layout spine %u", pos_.spine);
   scratch_.reset();
   // The writer's page index must not share an arena with layout: layout
   // rewinds its scratch between pages and would overwrite index chunks

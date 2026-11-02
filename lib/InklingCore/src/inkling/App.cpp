@@ -23,6 +23,7 @@ InklingApp::InklingApp(Storage& storage, BookReader* reader, DeviceStatus& statu
 
 void InklingApp::begin() {
   library_.scan(storage_);
+  INKLING_LOG("library: %d books", library_.count());
   selected_ = 0;
   nav_.reset(0);
   mode_ = Mode::Library;
@@ -90,6 +91,7 @@ void InklingApp::openSelected() {
   showMessage("Apro il libro...");
   flush(RefreshHint::Fast);
 
+  INKLING_LOG("open %s", book.path);
   ReaderLayout layout;
   layout.pageHeight = static_cast<int16_t>(frame_.width - kStatusLineHeight);  // portrait: logical height
   const auto st = reader_->open(book.path, layout);
@@ -99,7 +101,8 @@ void InklingApp::openSelected() {
     showMessage(text);
     return;
   }
-  reader_->prepare();  // first chapter layout, before the UI frame starts
+  const auto prep = reader_->prepare();  // first chapter layout, before the UI frame starts
+  INKLING_LOG("opened, first chapter: %s", freeink::book::bookStatusName(prep));
   mode_ = Mode::Reader;
   turnsSinceFull_ = 0;
   ui_.setScreen(readerScreen, this, RefreshHint::Full);

@@ -20,7 +20,6 @@
 
 #include "DeviceLog.h"
 #include "FirmwareSlots.h"
-#include "OtaMode.h"
 #include "SdStorage.h"
 #include "inkling/App.h"
 #include "inkling/Screens.h"
@@ -133,23 +132,13 @@ void renderNow() {
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
 
-void showOtaView(const inkling::OtaView& view, void*) {
-  static inkling::OtaView shown;
-  shown = view;
-  ui->setScreen(inkling::otaScreen, &shown, freeink::ui::RefreshHint::Fast);
-  renderNow();
-}
-
-bool backPressedNow(void*) {
-  input.update();
-  return input.wasPressed(InputManager::BTN_BACK);
-}
-
 void onAppRequest(inkling::InklingApp::Request request, void*) {
   if (request == inkling::InklingApp::Request::WifiUpdate) {
-    LOG("restarting into Wi-Fi update mode");
+    // The updater lives in the other app slot.
+    LOG("switching to the updater: %s", firmware::otherSlotName());
     app->shutdown();
-    ota::restartIntoUpdateMode();
+    firmware::bootOtherSlot();  // returns only on failure
+    app->showMessage("Nessun updater nell'altro slot");
   }
 }
 
@@ -212,8 +201,7 @@ void handleButtons() {
 
 void setup() {
   Serial.begin(115200);
-  devlog::begin();
-  const bool updateMode = ota::consumeUpdateModeRequest();
+  devlog::begin("reader");
 
   // Board detection must come first: it picks the X3 profile (UC8253 or the
   // newer UC8279 batch) and latches the power rails before any pin is used.
@@ -234,6 +222,10 @@ void setup() {
   SPI.begin(pins.sclk, BoardConfig::ACTIVE.sd.miso, pins.mosi, pins.cs);
 
   status.sdReady = SdMan.begin();
+  // Boot steps go to the card too, synced line by line: if this build crashes
+  // before markValid(), the bootloader rolls back to the updater, which can
+  // still serve this file.
+  if (status.sdReady) devlog::attachFile("/.inkling/boot.log");
 
   static EInkDisplay einkDisplay(pins.sclk, pins.mosi, pins.cs, pins.dc, pins.rst, pins.busy);
   display = &einkDisplay;
@@ -258,16 +250,6 @@ void setup() {
   ui = &uiApp;
   ui->setClearColor(freeink::ui::Color::White);
 
-  // Wi-Fi update mode: no reader arenas, so the Wi-Fi stack gets the heap.
-  if (updateMode) {
-    static ota::Config config;
-    if (ota::loadConfig(config)) {
-      LOG("update mode, free heap %u", static_cast<unsigned>(ESP.getFreeHeap()));
-      ota::run(config, ota::Hooks{showOtaView, backPressedNow, nullptr});  // never returns
-    }
-    LOG("update mode: missing %s", ota::kConfigPath);
-    status.notice = "Manca /.inkling/wifi.txt sulla scheda";
-  }
 
   freeink::book::FrameTarget frame{display->getFrameBuffer(), static_cast<int16_t>(display->getDisplayWidth()),
                                    static_cast<int16_t>(display->getDisplayHeight()),
@@ -325,6 +307,13 @@ void setup() {
     app->begin();  // library
   }
   app->update();
+
+  // First screen is up: this build works, keep it (cancels the rollback), and
+  // stop writing the log to the card.
+  firmware::markValid();
+  LOG("boot done, free heap %u (max block %u)", static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()));
+  devlog::detachFile();
 }
 
 void loop() {

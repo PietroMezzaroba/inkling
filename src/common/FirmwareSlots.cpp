@@ -17,6 +17,22 @@ const esp_partition_t* otherSlot() { return esp_ota_get_next_update_partition(nu
 
 }  // namespace
 
+void markValid() {
+  esp_ota_img_states_t state;
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running && esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+    esp_ota_mark_app_valid_cancel_rollback();
+  }
+}
+
+}  // namespace firmware
+
+// Arduino validates a pending image in initArduino(), before setup() runs,
+// which would defeat the rollback. Each app validates itself via markValid().
+extern "C" bool verifyRollbackLater() { return true; }
+
+namespace firmware {
+
 const char* otherSlotName() {
   static char name[48];
   esp_app_desc_t desc;

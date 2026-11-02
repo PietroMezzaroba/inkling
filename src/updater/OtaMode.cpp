@@ -24,12 +24,9 @@ namespace ota {
 
 namespace {
 
-constexpr uint32_t kRequestMagic = 0x4154304F;    // "O0TA"
 constexpr unsigned long kConnectTimeoutMs = 20000;
 constexpr unsigned long kIdleTimeoutMs = 15 * 60 * 1000;
 constexpr size_t kChunk = 4096;
-
-RTC_NOINIT_ATTR uint32_t updateModeRequest;
 
 const Config* activeConfig = nullptr;
 
@@ -39,6 +36,13 @@ std::atomic<bool> restartPending{false};
 std::atomic<bool> receiving{false};
 std::atomic<unsigned long> lastActivityMs{0};
 const char* volatile failure = nullptr;
+
+// Leaves the updater: back to the reader in the other slot (a plain restart if
+// that slot holds nothing bootable).
+[[noreturn]] void leave() {
+  firmware::bootOtherSlot();
+  esp_restart();
+}
 
 void trimLine(char* s) {
   size_t n = strlen(s);
@@ -76,6 +80,31 @@ esp_err_t handleLog(httpd_req_t* req) {
   const esp_err_t err = httpd_resp_sendstr(req, text);
   free(text);
   return err;
+}
+
+// Streams a log file the reader left on the SD card (its boot log survives
+// the crash and the rollback that brought us here).
+esp_err_t handleSdLog(httpd_req_t* req) {
+  lastActivityMs = millis();
+  char query[48] = {}, name[16] = "boot";
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "name", name, sizeof(name));
+  }
+  const char* path = strcmp(name, "updater") == 0 ? "/.inkling/updater.log" : "/.inkling/boot.log";
+  FsFile f = SdMan.open(path, O_RDONLY);
+  if (!f) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_sendstr(req, "no such log on the card\n");
+  }
+  httpd_resp_set_type(req, "text/plain; charset=utf-8");
+  char* buf = static_cast<char*>(malloc(1024));
+  if (!buf) return httpd_resp_send_500(req);
+  int n;
+  while ((n = f.read(buf, 1024)) > 0) {
+    if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+  }
+  free(buf);
+  return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 esp_err_t fail(httpd_req_t* req, const char* status, const char* why) {
@@ -150,6 +179,7 @@ httpd_handle_t startServer() {
   static const httpd_uri_t routes[] = {
       {.uri = "/info", .method = HTTP_GET, .handler = handleInfo, .user_ctx = nullptr},
       {.uri = "/log", .method = HTTP_GET, .handler = handleLog, .user_ctx = nullptr},
+      {.uri = "/sdlog", .method = HTTP_GET, .handler = handleSdLog, .user_ctx = nullptr},
       {.uri = "/update", .method = HTTP_POST, .handler = handleUpdate, .user_ctx = nullptr},
   };
   for (const auto& r : routes) httpd_register_uri_handler(server, &r);
@@ -180,17 +210,6 @@ bool loadConfig(Config& out) {
   return out.ssid[0] != '\0' && out.token[0] != '\0';
 }
 
-void restartIntoUpdateMode() {
-  updateModeRequest = kRequestMagic;
-  esp_restart();
-}
-
-bool consumeUpdateModeRequest() {
-  const bool requested = esp_reset_reason() == ESP_RST_SW && updateModeRequest == kRequestMagic;
-  updateModeRequest = 0;
-  return requested;
-}
-
 void run(const Config& config, const Hooks& hooks) {
   activeConfig = &config;
   inkling::OtaView view;
@@ -206,7 +225,7 @@ void run(const Config& config, const Hooks& hooks) {
   WiFi.begin(config.ssid, config.password);
   const unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < kConnectTimeoutMs) {
-    if (hooks.backPressed(hooks.user)) esp_restart();
+    if (hooks.backPressed(hooks.user)) leave();
     delay(100);
   }
 
@@ -215,7 +234,7 @@ void run(const Config& config, const Hooks& hooks) {
     view.state = "rete non raggiungibile";
     hooks.show(view, hooks.user);
     while (!hooks.backPressed(hooks.user)) delay(50);
-    esp_restart();
+    leave();
   }
 
   const String ip = WiFi.localIP().toString();
@@ -228,7 +247,7 @@ void run(const Config& config, const Hooks& hooks) {
     view.state = "server non avviato";
     hooks.show(view, hooks.user);
     while (!hooks.backPressed(hooks.user)) delay(50);
-    esp_restart();
+    leave();
   }
 
   view.state = "in attesa";
@@ -261,10 +280,10 @@ void run(const Config& config, const Hooks& hooks) {
       shownProgress = -1;
       hooks.show(view, hooks.user);
     }
-    if (hooks.backPressed(hooks.user)) esp_restart();
+    if (hooks.backPressed(hooks.user)) leave();
     if (!receiving && millis() - lastActivityMs > kIdleTimeoutMs) {
       LOG("ota: idle timeout");
-      esp_restart();
+      leave();
     }
     delay(50);
   }

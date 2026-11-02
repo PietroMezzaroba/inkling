@@ -2,10 +2,20 @@
 
 #include <cstddef>
 
-// The X3 flash has two app slots (OTA). Inkling runs from one; the other keeps
-// whatever was installed before (e.g. CrossPet). Both escape hatches below work
-// without a USB cable.
+// The X3 flash has two app slots (OTA): the Inkling reader in one, the Inkling
+// updater in the other (or, before the updater is installed, CrossPet). Both
+// escape hatches below work without a USB cable.
+//
+// The X3's bootloader rolls back: a freshly installed image boots "on
+// probation" and, if the chip resets before the image calls markValid(), the
+// next boot returns to the previous slot. Each app calls markValid() only
+// once it has proven itself (screen drawn), so a crash in a new build lands
+// back in the other app instead of a crash loop.
 namespace firmware {
+
+// Confirms this image works and cancels the pending rollback. Cheap and
+// harmless when the image is already valid.
+void markValid();
 
 // Name of the app in the other slot ("" if it holds no valid image).
 const char* otherSlotName();
