@@ -1,7 +1,9 @@
 #!/bin/sh
 # Builds the firmware and sends it to the X3 over Wi-Fi.
 #
-#   scripts/ota.sh            build + upload + show device info
+#   scripts/ota.sh            build + upload the reader
+#   scripts/ota.sh --updater  build + upload the updater itself (it lands in the
+#                             reader's slot; the two slots swap roles)
 #   scripts/ota.sh --info     only print device info
 #   scripts/ota.sh --log      only print the updater's log
 #   scripts/ota.sh --sdlog    only print the reader's boot log from the card
@@ -20,7 +22,10 @@ case "${1:-}" in
   --log) exec curl -fsS "http://$HOST/log" ;;
   --sdlog) exec curl -fsS "http://$HOST/sdlog?name=boot" ;;
   --info) exec curl -fsS "http://$HOST/info" ;;
+  --coredump) exec curl -fsS -o "${2:-coredump.bin}" "http://$HOST/coredump" ;;
 esac
+ENV=x3
+[ "${1:-}" = "--updater" ] && ENV=x3-updater
 
 if [ ! -s .ota-token ]; then
   echo "missing .ota-token (see README)" >&2
@@ -28,8 +33,8 @@ if [ ! -s .ota-token ]; then
 fi
 TOKEN="$(cat .ota-token)"
 
-"$PIO" run -e x3
-BIN=.pio/build/x3/firmware.bin
+"$PIO" run -e "$ENV"
+BIN=.pio/build/$ENV/firmware.bin
 
 echo "uploading $(wc -c < "$BIN" | tr -d ' ') bytes to $HOST ..."
 curl -fsS --max-time 300 -X POST \

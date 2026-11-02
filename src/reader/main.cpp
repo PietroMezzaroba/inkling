@@ -277,10 +277,22 @@ void setup() {
   }
   bool fontsOk = false;
   if (readerMemory) {
-    size_t regularLen = spare() >= Glyphs::kRegularIdeal ? Glyphs::kRegularIdeal : Glyphs::kRegularMin;
+    // stb_truetype mallocs while rasterizing a glyph: an active-edge block of
+    // ~26 KB that must be contiguous (a crash on device when it was not). The
+    // caches are sized so that block always stays available: italic goes first,
+    // then the regular cache shrinks to its minimum.
+    constexpr size_t kRasterReserve = 32 * 1024;
+    auto fits = [&](size_t len) {
+      return ESP.getMaxAllocHeap() >= len + kRasterReserve && spare() >= len + kRasterReserve;
+    };
+    size_t regularLen = fits(Glyphs::kRegularIdeal) ? Glyphs::kRegularIdeal : Glyphs::kRegularMin;
     uint8_t* regularCache = static_cast<uint8_t*>(malloc(regularLen));
     uint8_t* italicCache = nullptr;
-    if (regularCache && spare() >= Glyphs::kItalic) italicCache = static_cast<uint8_t*>(malloc(Glyphs::kItalic));
+    if (regularCache && fits(Glyphs::kItalic)) italicCache = static_cast<uint8_t*>(malloc(Glyphs::kItalic));
+    if (italicCache && ESP.getMaxAllocHeap() < kRasterReserve) {
+      free(italicCache);  // the two caches split the big free block: give it back
+      italicCache = nullptr;
+    }
 
     static inkling::BookReader bookReader(storage, *readerMemory);
     reader = &bookReader;
@@ -299,8 +311,8 @@ void setup() {
       uiFallback.setFont(&reader->regularFont());
       displayTarget.setGlyphFallback(&uiFallback);
     }
-    LOG("glyph caches: regular %u, italic %u", static_cast<unsigned>(regularCache ? regularLen : 0),
-        static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0));
+    LOG("glyph caches: regular %u, italic %u, max block left %u", static_cast<unsigned>(regularCache ? regularLen : 0),
+        static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0), static_cast<unsigned>(ESP.getMaxAllocHeap()));
   } else {
     status.notice = "Memoria insufficiente per il lettore";
   }

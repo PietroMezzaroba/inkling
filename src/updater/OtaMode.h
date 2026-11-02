@@ -16,6 +16,8 @@
 //   GET  /info               version, slots, free heap
 //   GET  /log                updater log ring
 //   GET  /sdlog[?name=...]   log files on the card: boot (reader, default), updater
+//   GET  /coredump           raw core dump partition of the last crash
+//   GET  /file?path=...      any file on the card, read-only
 //   POST /update             raw reader .bin, header "X-Inkling-Token: <token>";
 //                            written to the reader's slot, then restarts into it
 namespace ota {

@@ -8,6 +8,7 @@
 #include <esp_attr.h>
 #include <esp_http_server.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
 
 #include <atomic>
 #include <cstdio>
@@ -107,6 +108,52 @@ esp_err_t handleSdLog(httpd_req_t* req) {
   return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
+// Raw "coredump" partition (ESP-IDF ELF core dump of the last crash), for
+// esp_coredump on the Mac with the crashed build's ELF.
+esp_err_t handleCoredump(httpd_req_t* req) {
+  lastActivityMs = millis();
+  const esp_partition_t* p =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+  if (!p) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_sendstr(req, "no coredump partition\n");
+  }
+  uint8_t* buf = static_cast<uint8_t*>(malloc(2048));
+  if (!buf) return httpd_resp_send_500(req);
+  httpd_resp_set_type(req, "application/octet-stream");
+  for (uint32_t off = 0; off < p->size; off += 2048) {
+    if (esp_partition_read(p, off, buf, 2048) != ESP_OK) break;
+    if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buf), 2048) != ESP_OK) break;
+  }
+  free(buf);
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// Read-only access to any file on the card: GET /file?path=/.inkling/x.
+esp_err_t handleFile(httpd_req_t* req) {
+  lastActivityMs = millis();
+  char query[160] = {}, path[128] = {};
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+      httpd_query_key_value(query, "path", path, sizeof(path)) != ESP_OK || path[0] != '/') {
+    httpd_resp_set_status(req, "400 Bad Request");
+    return httpd_resp_sendstr(req, "use /file?path=/absolute/path\n");
+  }
+  FsFile f = SdMan.open(path, O_RDONLY);
+  if (!f || f.isDirectory()) {
+    httpd_resp_set_status(req, "404 Not Found");
+    return httpd_resp_sendstr(req, "no such file\n");
+  }
+  char* buf = static_cast<char*>(malloc(2048));
+  if (!buf) return httpd_resp_send_500(req);
+  httpd_resp_set_type(req, "application/octet-stream");
+  int n;
+  while ((n = f.read(buf, 2048)) > 0) {
+    if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+  }
+  free(buf);
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
 esp_err_t fail(httpd_req_t* req, const char* status, const char* why) {
   LOG("ota: rejected: %s", why);
   failure = why;
@@ -180,6 +227,8 @@ httpd_handle_t startServer() {
       {.uri = "/info", .method = HTTP_GET, .handler = handleInfo, .user_ctx = nullptr},
       {.uri = "/log", .method = HTTP_GET, .handler = handleLog, .user_ctx = nullptr},
       {.uri = "/sdlog", .method = HTTP_GET, .handler = handleSdLog, .user_ctx = nullptr},
+      {.uri = "/coredump", .method = HTTP_GET, .handler = handleCoredump, .user_ctx = nullptr},
+      {.uri = "/file", .method = HTTP_GET, .handler = handleFile, .user_ctx = nullptr},
       {.uri = "/update", .method = HTTP_POST, .handler = handleUpdate, .user_ctx = nullptr},
   };
   for (const auto& r : routes) httpd_register_uri_handler(server, &r);

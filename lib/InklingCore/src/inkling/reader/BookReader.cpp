@@ -1,5 +1,7 @@
 #include "BookReader.h"
 
+#include "inkling/text/Nfc.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -43,6 +45,7 @@ void titleFromPath(const char* path, char* out, size_t cap) {
   snprintf(out, cap, "%s", base);
   char* dot = strrchr(out, '.');
   if (dot && dot != out) *dot = '\0';
+  composeLatinNfc(out);
 }
 
 struct SavedPosition {

@@ -1,5 +1,7 @@
 #include "Library.h"
 
+#include "inkling/text/Nfc.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -64,6 +66,7 @@ void Library::onEntry(const char* name, bool isDir, void* user) {
   }
   memcpy(e.name, name, len);
   e.name[len] = '\0';
+  composeLatinNfc(e.name);
   self.count_++;
 }
 
