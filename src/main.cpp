@@ -1,7 +1,7 @@
 // Inkling firmware entry point (Xteink X3).
 //
-// Phase 0: bring up every piece of hardware and show it on a diagnostic screen.
-// All drawing goes through InklingCore so the simulator renders the same pixels.
+// Hardware bring-up and the main loop. Everything the user sees is InklingApp
+// (lib/InklingCore), which the host simulator runs unchanged.
 
 #include <Arduino.h>
 #include <BatteryMonitor.h>
@@ -17,6 +17,8 @@
 #include <XteinkDetect.h>
 
 #include "FirmwareSlots.h"
+#include "SdStorage.h"
+#include "inkling/App.h"
 #include "inkling/Screens.h"
 
 #if INKLING_SERIAL_LOG
@@ -26,6 +28,13 @@
   do {           \
   } while (0)
 #endif
+
+// Reading faces, embedded in flash by board_build.embed_files and read in place
+// through the flash cache: no RAM copy.
+extern const uint8_t kFontRegularStart[] asm("_binary_assets_fonts_Alegreya_Regular_ttf_start");
+extern const uint8_t kFontRegularEnd[] asm("_binary_assets_fonts_Alegreya_Regular_ttf_end");
+extern const uint8_t kFontItalicStart[] asm("_binary_assets_fonts_Alegreya_Italic_ttf_start");
+extern const uint8_t kFontItalicEnd[] asm("_binary_assets_fonts_Alegreya_Italic_ttf_end");
 
 namespace {
 
@@ -44,8 +53,11 @@ freeink::Rtc rtc;
 freeink::Imu imu;
 BatteryMonitor* battery = nullptr;
 
-freeink::ui::DisplayTarget* target = nullptr;
-inkling::UiApp* app = nullptr;
+SdStorage storage;
+inkling::ReaderMemory readerMemory;  // ~200 KB of fixed arenas, see BookReader.h
+inkling::BookReader reader(storage, readerMemory);
+inkling::UiApp* ui = nullptr;
+inkling::InklingApp* app = nullptr;
 inkling::DeviceStatus status;
 
 // The press that powered the device on is still held at boot; Power only arms
@@ -92,19 +104,25 @@ bool pollStatus() {
     status.ay = sample.ay;
     status.az = sample.az;
   }
+
+  status.freeHeap = ESP.getFreeHeap();
+  status.largestBlock = ESP.getMaxAllocHeap();
   return changed;
 }
 
-void renderIfNeeded() {
-  if (!app->invalidated()) return;
-  app->render(freeink::ui::InputSnapshot{});
-  freeink::ui::present(*display, app->lastRenderRefreshHint());
+void presentFrame(freeink::ui::RefreshHint hint, void*) { freeink::ui::present(*display, hint); }
+
+void renderNow() {
+  if (!ui->invalidated()) return;
+  ui->render(freeink::ui::InputSnapshot{});
+  presentFrame(ui->lastRenderRefreshHint(), nullptr);
 }
 
 [[noreturn]] void powerOff() {
   LOG("power off");
-  app->setScreen(inkling::sleepScreen, nullptr, freeink::ui::RefreshHint::Full);
-  renderIfNeeded();
+  app->shutdown();  // reading position is already saved per page; this closes files
+  ui->setScreen(inkling::sleepScreen, nullptr, freeink::ui::RefreshHint::Full);
+  renderNow();
   display->deepSleep();
   imu.sleep();
 
@@ -125,36 +143,36 @@ bool backHeldAtBoot() {
   return input.isPressed(InputManager::BTN_BACK);
 }
 
-void showMessage(const char* message) {
-  app->setScreen(inkling::messageScreen, const_cast<char*>(message), freeink::ui::RefreshHint::Full);
-  renderIfNeeded();
-}
-
-void bootOtherSlotOrComplain() {
-  LOG("switching to other slot: %s", status.otherFirmware);
-  showMessage("Riavvio nell'altro firmware...");
-  firmware::bootOtherSlot();  // returns only on failure
-  status.notice = "Nessun firmware nell'altro slot";
-  app->setScreen(inkling::diagnosticScreen, &status, freeink::ui::RefreshHint::Full);
-}
-
 void handleButtons() {
-  for (uint8_t b = InputManager::BTN_BACK; b <= InputManager::BTN_DOWN; ++b) {
-    if (!input.wasPressed(b)) continue;
-    status.lastButton = InputManager::getButtonName(b);
+  static constexpr struct {
+    uint8_t hw;
+    inkling::Button button;
+  } kMap[] = {
+      {InputManager::BTN_BACK, inkling::Button::Back},   {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
+      {InputManager::BTN_LEFT, inkling::Button::Left},   {InputManager::BTN_RIGHT, inkling::Button::Right},
+      {InputManager::BTN_UP, inkling::Button::Up},       {InputManager::BTN_DOWN, inkling::Button::Down},
+  };
+  for (const auto& m : kMap) {
+    if (!input.wasPressed(m.hw)) continue;
+    status.lastButton = InputManager::getButtonName(m.hw);
     status.buttonPresses++;
-    pollStatus();  // fresh IMU values with every press
-    app->invalidate();
-    LOG("button %s", status.lastButton);
+    if (app->mode() == inkling::InklingApp::Mode::Diagnostic) pollStatus();  // fresh IMU values per press
+    app->onButton(m.button);
   }
 
-  if (input.isPressed(InputManager::BTN_BACK)) {
+  // Back held 3 s on the diagnostic screen: restart into the other slot. Only
+  // there, so closing a book with Back can never turn into a firmware switch.
+  if (input.isPressed(InputManager::BTN_BACK) && app->mode() == inkling::InklingApp::Mode::Diagnostic) {
     if (backPressedAt == 0) backPressedAt = millis();
     if (!backHoldHandled && millis() - backPressedAt >= kOtherSlotHoldMs) {
       backHoldHandled = true;
-      bootOtherSlotOrComplain();
+      LOG("switching to other slot: %s", status.otherFirmware);
+      app->showMessage("Riavvio nell'altro firmware...");
+      app->update();
+      firmware::bootOtherSlot();  // returns only on failure
+      app->showMessage("Nessun firmware nell'altro slot");
     }
-  } else {
+  } else if (!input.isPressed(InputManager::BTN_BACK)) {
     backPressedAt = 0;
     backHoldHandled = false;
   }
@@ -183,10 +201,10 @@ void setup() {
   // powering on restarts into the other slot (e.g. the previous CrossPet).
   input.begin();
   status.otherFirmware = firmware::otherSlotName();
-  if (backHeldAtBoot()) {
-    backHoldHandled = true;  // don't fire the long-press again for this same hold
+  const bool backHeld = backHeldAtBoot();
+  if (backHeld) {
+    backHoldHandled = true;     // don't fire the long-press again for this same hold
     firmware::bootOtherSlot();  // returns only on failure
-    status.notice = "Nessun firmware nell'altro slot";
   }
 
   const auto& pins = BoardConfig::ACTIVE.display;
@@ -215,15 +233,30 @@ void setup() {
   static freeink::ui::DisplayTarget displayTarget(display->getFrameBuffer(), display->getDisplayWidth(),
                                                   display->getDisplayHeight(), display->getDisplayWidthBytes());
   static inkling::UiApp uiApp(displayTarget, displayTarget.deviceContext());
-  target = &displayTarget;
-  app = &uiApp;
-  app->setClearColor(freeink::ui::Color::White);
+  ui = &uiApp;
+  ui->setClearColor(freeink::ui::Color::White);
+
+  freeink::book::FrameTarget frame{display->getFrameBuffer(), static_cast<int16_t>(display->getDisplayWidth()),
+                                   static_cast<int16_t>(display->getDisplayHeight()),
+                                   static_cast<int16_t>(display->getDisplayWidthBytes())};
+  frame.format = freeink::book::FrameFormat::Mono1Dithered;
+  frame.rotation = freeink::book::FrameRotation::Portrait;
+
+  static inkling::InklingApp inklingApp(storage, reader, status, uiApp, frame);
+  app = &inklingApp;
+  app->setPresenter(presentFrame, nullptr);
+
+  const bool fontsOk = reader.initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
+                                        kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart));
+  LOG("fonts: %d (%u + %u bytes)", fontsOk, static_cast<unsigned>(kFontRegularEnd - kFontRegularStart),
+      static_cast<unsigned>(kFontItalicEnd - kFontItalicStart));
 
   // SD self-update: works for any ESP32-C3 app, so CrossPet can be put back
   // the same way by saving its .bin as /inkling.bin.
   if (status.sdReady && SdMan.exists(firmware::kSdUpdatePath)) {
     LOG("SD update found: %s", firmware::kSdUpdatePath);
-    showMessage("Aggiornamento dalla scheda SD...");
+    app->showMessage("Aggiornamento dalla scheda SD...");
+    app->update();
     const char* error = "";
     firmware::installFromSd(firmware::kSdUpdatePath, &error);  // restarts on success
     LOG("SD update failed: %s", error);
@@ -232,8 +265,13 @@ void setup() {
     status.notice = notice;
   }
 
-  app->setScreen(inkling::diagnosticScreen, &status, freeink::ui::RefreshHint::Full);
-  renderIfNeeded();
+  if (backHeld) status.notice = "Nessun firmware nell'altro slot";
+  if (!status.sdReady || !fontsOk || status.notice) {
+    app->showDiagnostic();  // something to tell: start on the hardware screen
+  } else {
+    app->begin();  // library
+  }
+  app->update();
 }
 
 void loop() {
@@ -242,9 +280,9 @@ void loop() {
 
   if (millis() - lastPollMs >= kStatusPollMs) {
     lastPollMs = millis();
-    if (pollStatus()) app->invalidate();
+    if (pollStatus()) app->refreshDiagnostic();
   }
 
-  renderIfNeeded();
+  app->update();
   delay(10);
 }

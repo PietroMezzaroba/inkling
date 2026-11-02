@@ -28,6 +28,9 @@ struct DeviceStatus {
   const char* lastButton = nullptr;  // nullptr until the first press
   uint32_t buttonPresses = 0;
 
+  uint32_t freeHeap = 0;      // bytes, 0 = unknown (simulator)
+  uint32_t largestBlock = 0;  // biggest single allocation still possible
+
   const char* otherFirmware = "";  // app in the other flash slot, "" if none
   const char* notice = nullptr;    // one-line message, e.g. a failed SD update
 };

@@ -6,7 +6,7 @@ namespace inkling {
 
 namespace {
 
-constexpr uint8_t kDiagRows = 7;
+constexpr uint8_t kDiagRows = 8;
 
 }  // namespace
 
@@ -15,7 +15,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
 
   // Cell text lives in statics: the table borrows the pointers until the frame
   // is pushed, and the screen function is the only writer.
-  static char device[40], clock[32], battery[32], sd[16], imu[48], button[40], other[52];
+  static char device[40], clock[32], battery[32], sd[16], imu[48], button[40], other[52], memory[40];
 
   snprintf(device, sizeof(device), "%s (%s)", s.deviceName, s.panelName);
   if (s.clockValid) {
@@ -40,6 +40,12 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
     snprintf(button, sizeof(button), "premi un tasto");
   }
   snprintf(other, sizeof(other), "%s", (s.otherFirmware && s.otherFirmware[0]) ? s.otherFirmware : "nessuno");
+  if (s.freeHeap) {
+    snprintf(memory, sizeof(memory), "%lu KB (max %lu KB)", static_cast<unsigned long>(s.freeHeap / 1024),
+             static_cast<unsigned long>(s.largestBlock / 1024));
+  } else {
+    snprintf(memory, sizeof(memory), "n/d");
+  }
 
   const char* cells[kDiagRows * 2] = {
       "Dispositivo", device,  //
@@ -48,6 +54,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
       "Scheda SD",   sd,      //
       "Movimento",   imu,     //
       "Ultimo tasto", button, //
+      "Memoria",     memory,  //
       "Altro slot",  other,
   };
 
@@ -63,7 +70,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
   screen.table(table);
 
   const freeink::ui::FooterAction hints[] = {
-      {.label = "Power 1 s: spegni", .enabled = false},
+      {.label = "Back: libreria", .enabled = false},
       {.label = "Back 3 s: altro slot", .enabled = false},
   };
   screen.footer(hints, 2, freeink::ui::LayoutAnchor::Bottom);
