@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 // The X3 flash has two app slots (OTA): the Inkling reader in one, the Inkling
 // updater in the other (or, before the updater is installed, CrossPet). Both
@@ -23,6 +24,14 @@ const char* otherSlotName();
 // Makes the other slot the boot slot and restarts into it. Returns only on
 // failure (no valid image there).
 bool bootOtherSlot();
+
+// Checks whether the other slot holds a different build than the embedded
+// updater image (`image[0..size)`).
+bool updaterSlotNeedsUpgrade(const uint8_t* image, size_t size);
+
+// Flashes an embedded updater image into the other slot, makes it the boot
+// slot, and restarts into it.
+bool installEmbeddedUpdaterAndBoot(const uint8_t* image, size_t size);
 
 // SD self-update: if `path` exists on the card, flash it into the other slot,
 // rename it to "<path>.installed" and restart. Returns only when there is no

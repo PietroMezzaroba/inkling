@@ -5,6 +5,8 @@
 #include "inkling/DeviceStatus.h"
 #include "inkling/Platform.h"
 #include "inkling/Screens.h"
+#include "inkling/game/BreachGame.h"
+#include "inkling/pet/PetEngine.h"
 #include "inkling/reader/BookReader.h"
 #include "inkling/reader/Library.h"
 
@@ -14,17 +16,23 @@ namespace inkling {
 // firmware (power-off), never by the app.
 enum class Button : uint8_t { Back, Confirm, Left, Right, Up, Down };
 
-// The whole Inkling UI as a state machine over semantic buttons. Platform code
-// owns the hardware, feeds buttons in, and pushes frames out through `present`.
+// The whole Inkling OS UI as a state machine over semantic buttons.
 class InklingApp {
  public:
-  enum class Mode : uint8_t { Library, Reader, ReaderMenu, Toc, Diagnostic, Message };
+  enum class Mode : uint8_t {
+    Home,
+    Library,
+    PetSanctuary,
+    BreachGame,
+    Reader,
+    ReaderMenu,
+    Toc,
+    Diagnostic,
+    Message,
+  };
 
-  // Pushes the framebuffer to the panel (no-op or PNG dump in the simulator).
   using PresentFn = void (*)(freeink::ui::RefreshHint hint, void* user);
 
-  // `reader` may be null (out of memory): the library and diagnostics still
-  // work, opening a book explains the problem.
   InklingApp(Storage& storage, BookReader* reader, DeviceStatus& status, UiApp& ui,
              const freeink::book::FrameTarget& frame);
 
@@ -33,7 +41,6 @@ class InklingApp {
     presentUser_ = user;
   }
 
-  // Things only the platform can do (restart into another boot mode).
   enum class Request : uint8_t { WifiUpdate };
   using RequestFn = void (*)(Request request, void* user);
   void setRequestHandler(RequestFn fn, void* user) {
@@ -41,32 +48,47 @@ class InklingApp {
     requestUser_ = user;
   }
 
-  // Startup: scans the card, then reopens the last book (unless reopening it
-  // crashed last time) or shows the library.
+  // Startup: loads prefs & Pet state, scans the library, then either resumes
+  // the active book (if powered off while reading) or opens the Home Command Center.
   void begin();
+  void showHome();
   void showLibrary();
+  void showPetSanctuary();
+  void showBreachGame();
   void onButton(Button button);
-  // Renders and presents if anything changed since the last frame.
+  // Feeds live IMU readings so a physical shake/tilt interacts with the Pet!
+  void onImuSample(float ax, float ay, float az);
+
   void update();
-  // Saves the reading position; call before the power is cut.
   void shutdown();
 
   Mode mode() const { return mode_; }
   void showDiagnostic();
-  // Redraws the diagnostic screen if it is showing (new sensor readings).
   void refreshDiagnostic() {
-    if (mode_ == Mode::Diagnostic) ui_.invalidate(freeink::ui::RefreshHint::Fast);
+    if (mode_ == Mode::Diagnostic || mode_ == Mode::Home || mode_ == Mode::PetSanctuary) {
+      ui_.invalidate(freeink::ui::RefreshHint::Fast);
+    }
   }
   void showMessage(const char* text);
 
+  const PetEngine& pet() const { return pet_; }
+  PetEngine& pet() { return pet_; }
+  const Library& library() const { return library_; }
+  const DeviceStatus& status() const { return status_; }
+  const BookReader* reader() const { return reader_; }
+  int activeBookIndex() const;
+  ReaderLayout currentLayout() const;
+
   // Screen functions read the app through the `user` pointer.
+  static void homeScreen(UiApp::ScreenType& screen, void* user);
   static void libraryScreen(UiApp::ScreenType& screen, void* user);
+  static void petSanctuaryScreen(UiApp::ScreenType& screen, void* user);
+  static void breachGameScreen(UiApp::ScreenType& screen, void* user);
   static void readerScreen(UiApp::ScreenType& screen, void* user);
   static void readerMenuScreen(UiApp::ScreenType& screen, void* user);
   static void tocScreen(UiApp::ScreenType& screen, void* user);
 
  private:
-  // A vertical menu with wrap-around selection (library, reader menu, TOC).
   struct Menu {
     int selected = 0;
     int count = 0;
@@ -75,16 +97,21 @@ class InklingApp {
     void move(int delta);
   };
 
+  LocalTime currentLocalTime() const;
   void openSelected();
+  void openActiveOrFirstBook();
   bool openBook(const char* path, bool resuming);
   void closeBook();
   void flush(freeink::ui::RefreshHint hint);
   void turnPage(bool forward);
   void showReader(freeink::ui::RefreshHint hint);
   void showReaderMenu();
+  void exitReaderMenu();
   void showToc();
+  void adjustMenuItem(int item, int delta);
   void runMenuItem(int item);
-  void changeFontSize(int delta);
+  void runHomeDockItem(int item);
+  void runSanctuaryAction(int item);
   void loadPrefs();
   void savePrefs();
   void setResumeLock(bool locked);
@@ -99,15 +126,27 @@ class InklingApp {
   RequestFn request_ = nullptr;
   void* requestUser_ = nullptr;
 
-  Mode mode_ = Mode::Library;
+  Mode mode_ = Mode::Home;
   Library library_;
-  Menu libraryMenu_, readerMenu_, tocMenu_;
+  PetEngine pet_;
+  BreachGame breach_;
+  Menu homeDock_, libraryMenu_, sanctuaryMenu_, readerMenu_, tocMenu_;
+  char lastBookPath_[128] = {};
   char message_[96] = {};
   freeink::book::BookStatus lastRenderStatus_ = freeink::book::BookStatus::Ok;
-  // E-paper ghosting: every Nth page turn is a full refresh.
   uint8_t turnsSinceFull_ = 0;
-  uint8_t fontStep_ = 2;        // index into the font size ladder (see App.cpp)
-  bool resumePending_ = false;  // a resumed book has not drawn its first page yet
+  uint8_t fontStep_ = 3;      // Default 42 px (CrossPet 14-16pt equivalent)
+  uint8_t fontFamily_ = 0;    // Default 0 = Noto Serif
+  uint8_t spacingStep_ = 0;   // Default 0 = Classico (Int. 102%, Marg. Medi)
+  uint8_t alignStep_ = 0;     // Default 0 = Giustificato + Sillabazione IT/EN
+  bool focusReading_ = false;
+  bool nightMode_ = false;
+  bool layoutDirty_ = false;
+  bool resumePending_ = false;
+  bool cursorOnlyRedraw_ = false;
+  bool needsReaderBackdrop_ = false;
+  float prevAx_ = 0.0f, prevAy_ = 0.0f, prevAz_ = 1.0f;
+  uint8_t imuCooldown_ = 0;
 };
 
 }  // namespace inkling

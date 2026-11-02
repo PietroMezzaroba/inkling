@@ -33,6 +33,10 @@ if [ ! -s .ota-token ]; then
 fi
 TOKEN="$(cat .ota-token)"
 
+if [ "$ENV" = "x3" ]; then
+  "$PIO" run -e x3-updater
+  cp .pio/build/x3-updater/firmware.bin assets/updater.bin
+fi
 "$PIO" run -e "$ENV"
 BIN=.pio/build/$ENV/firmware.bin
 

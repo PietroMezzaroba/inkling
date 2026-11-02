@@ -15,6 +15,8 @@
 #include "FirmwareSlots.h"
 #include "OtaMode.h"
 #include "inkling/Screens.h"
+#include "inkling/ui/CyberCanvas.h"
+#include "inkling/ui/InklingFonts.h"
 
 namespace {
 
@@ -35,9 +37,27 @@ void showView(const inkling::OtaView& view, void*) {
   render();
 }
 
-bool backPressed(void*) {
+bool latchedBack = false;
+bool latchedConfirm = false;
+
+void serviceButtons() {
   input.update();
-  return input.wasPressed(InputManager::BTN_BACK);
+  if (input.wasPressed(InputManager::BTN_BACK)) latchedBack = true;
+  if (input.wasPressed(InputManager::BTN_CONFIRM)) latchedConfirm = true;
+}
+
+bool backPressed(void*) {
+  serviceButtons();
+  if (!latchedBack) return false;
+  latchedBack = false;
+  return true;
+}
+
+bool confirmPressed(void*) {
+  serviceButtons();
+  if (!latchedConfirm) return false;
+  latchedConfirm = false;
+  return true;
 }
 
 [[noreturn]] void failAndWait(const char* message) {
@@ -72,15 +92,17 @@ void setup() {
 
   static freeink::ui::DisplayTarget target(display->getFrameBuffer(), display->getDisplayWidth(),
                                            display->getDisplayHeight(), display->getDisplayWidthBytes());
+  inkling::ui::bindInklingFonts(target);
+  inkling::ui::canvas::bindFramebuffer(display->getFrameBuffer(), display->getDisplayWidth(),
+                                       display->getDisplayHeight(), display->getDisplayWidthBytes());
   static inkling::UiApp app(target, target.deviceContext());
   ui = &app;
-  ui->setClearColor(freeink::ui::Color::White);
 
   LOG("updater: sd=%d free heap %u, reader slot: %s", sdReady, static_cast<unsigned>(ESP.getFreeHeap()),
       firmware::otherSlotName());
 
   // Up and drawing: confirm this image so the bootloader keeps it.
-  ui->setScreen(inkling::messageScreen, const_cast<char*>("Inkling Updater"), freeink::ui::RefreshHint::Full);
+  ui->setScreen(inkling::messageScreen, const_cast<char*>("Avvio Cyber-Net Hub..."), freeink::ui::RefreshHint::Full);
   render();
   firmware::markValid();
 
@@ -89,7 +111,7 @@ void setup() {
   if (!ota::loadConfig(config)) failAndWait("Manca /.inkling/wifi.txt. Back: torna al lettore");
   devlog::detachFile();  // the HTTP task logs from here; keep SD writes to the minimum
 
-  ota::run(config, ota::Hooks{showView, backPressed, nullptr});  // never returns
+  ota::run(config, ota::Hooks{showView, backPressed, confirmPressed, nullptr});  // never returns
 }
 
 void loop() {}

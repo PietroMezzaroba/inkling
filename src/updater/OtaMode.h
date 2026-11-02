@@ -32,15 +32,17 @@ constexpr const char* kConfigPath = "/.inkling/wifi.txt";
 
 bool loadConfig(Config& out);
 
-// Platform hooks for the update screen and the exit key.
+// Platform hooks for the update screen and hardware buttons.
 struct Hooks {
   void (*show)(const inkling::OtaView& view, void* user);
   bool (*backPressed)(void* user);
+  bool (*confirmPressed)(void* user);
   void* user;
 };
 
-// Serves updates until the user presses Back, the service idles out, or an
-// update lands; all three end by booting the reader.
+// Serves Cyber-Net Web Portal, Daily Ink Briefing, wireless book uploads, and
+// OTA updates until the user presses Back, the service idles out, or an update
+// lands; all end by booting the reader.
 [[noreturn]] void run(const Config& config, const Hooks& hooks);
 
 }  // namespace ota

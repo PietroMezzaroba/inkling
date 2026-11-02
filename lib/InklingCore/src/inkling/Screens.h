@@ -10,14 +10,14 @@ namespace inkling {
 // are fixed at compile time (FreeInkUI never allocates).
 using UiApp = freeink::ui::FreeInkApp<48, 16>;
 
-// Phase 0 diagnostic screen: proves display, buttons, clock, battery, SD and
-// IMU all work. `user` must point to a DeviceStatus.
+// Futuristic hardware & sensor telemetry deck. `user` must point to a DeviceStatus.
 void diagnosticScreen(UiApp::ScreenType& screen, void* user);
 
 // Shown right before the device powers off, and left on the panel while it is off.
+// `user` may point to an `InklingApp` (for live Pet + Book stats) or be nullptr.
 void sleepScreen(UiApp::ScreenType& screen, void* user);
 
-// Full-screen message; `user` must point to a NUL-terminated string.
+// Full-screen system modal message; `user` must point to a NUL-terminated string.
 void messageScreen(UiApp::ScreenType& screen, void* user);
 
 // What the Wi-Fi update mode shows; `user` must point to an OtaView.

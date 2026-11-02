@@ -6,6 +6,7 @@
 #include <esp_ota_ops.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace firmware {
 
@@ -48,6 +49,31 @@ bool bootOtherSlot() {
   if (!slot || esp_ota_get_partition_description(slot, &desc) != ESP_OK) return false;
   // set_boot_partition verifies the image before switching.
   if (esp_ota_set_boot_partition(slot) != ESP_OK) return false;
+  esp_restart();
+}
+
+bool updaterSlotNeedsUpgrade(const uint8_t* image, size_t size) {
+  if (!image || size < 0x20 + sizeof(esp_app_desc_t) || image[0] != kEspImageMagic) return false;
+  const esp_partition_t* slot = otherSlot();
+  esp_app_desc_t desc;
+  if (!slot || esp_ota_get_partition_description(slot, &desc) != ESP_OK) return true;
+  return memcmp(&desc, image + 0x20, sizeof(esp_app_desc_t)) != 0;
+}
+
+bool installEmbeddedUpdaterAndBoot(const uint8_t* image, size_t size) {
+  if (!image || size < 0x20 + sizeof(esp_app_desc_t) || image[0] != kEspImageMagic) return false;
+  if (!Update.begin(size, U_FLASH)) return false;
+  constexpr size_t kStep = 4096;
+  size_t done = 0;
+  while (done < size) {
+    const size_t chunk = (size - done) < kStep ? (size - done) : kStep;
+    if (Update.write(const_cast<uint8_t*>(image + done), chunk) != chunk) {
+      Update.abort();
+      return false;
+    }
+    done += chunk;
+  }
+  if (!Update.end(true)) return false;
   esp_restart();
 }
 
