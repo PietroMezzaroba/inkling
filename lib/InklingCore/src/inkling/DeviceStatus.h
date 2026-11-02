@@ -27,6 +27,9 @@ struct DeviceStatus {
 
   const char* lastButton = nullptr;  // nullptr until the first press
   uint32_t buttonPresses = 0;
+
+  const char* otherFirmware = "";  // app in the other flash slot, "" if none
+  const char* notice = nullptr;    // one-line message, e.g. a failed SD update
 };
 
 }  // namespace inkling

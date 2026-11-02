@@ -17,4 +17,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user);
 // Shown right before the device powers off, and left on the panel while it is off.
 void sleepScreen(UiApp::ScreenType& screen, void* user);
 
+// Full-screen message; `user` must point to a NUL-terminated string.
+void messageScreen(UiApp::ScreenType& screen, void* user);
+
 }  // namespace inkling

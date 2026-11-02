@@ -6,7 +6,7 @@ namespace inkling {
 
 namespace {
 
-constexpr uint8_t kDiagRows = 6;
+constexpr uint8_t kDiagRows = 7;
 
 }  // namespace
 
@@ -15,7 +15,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
 
   // Cell text lives in statics: the table borrows the pointers until the frame
   // is pushed, and the screen function is the only writer.
-  static char device[40], clock[32], battery[32], sd[16], imu[48], button[40];
+  static char device[40], clock[32], battery[32], sd[16], imu[48], button[40], other[52];
 
   snprintf(device, sizeof(device), "%s (%s)", s.deviceName, s.panelName);
   if (s.clockValid) {
@@ -39,6 +39,7 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
   } else {
     snprintf(button, sizeof(button), "premi un tasto");
   }
+  snprintf(other, sizeof(other), "%s", (s.otherFirmware && s.otherFirmware[0]) ? s.otherFirmware : "nessuno");
 
   const char* cells[kDiagRows * 2] = {
       "Dispositivo", device,  //
@@ -46,7 +47,8 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
       "Batteria",    battery, //
       "Scheda SD",   sd,      //
       "Movimento",   imu,     //
-      "Ultimo tasto", button,
+      "Ultimo tasto", button, //
+      "Altro slot",  other,
   };
 
   screen.header("Inkling", nullptr, "Diagnostica");
@@ -60,15 +62,23 @@ void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
   table.padding = 8;
   screen.table(table);
 
-  const freeink::ui::FooterAction hint[] = {
-      {.label = "Tieni premuto Power per spegnere", .enabled = false},
+  const freeink::ui::FooterAction hints[] = {
+      {.label = "Power 1 s: spegni", .enabled = false},
+      {.label = "Back 3 s: altro slot", .enabled = false},
   };
-  screen.footer(hint, 1, freeink::ui::LayoutAnchor::Bottom);
+  screen.footer(hints, 2, freeink::ui::LayoutAnchor::Bottom);
+
+  if (s.notice) screen.centeredText(s.notice);
 }
 
 void sleepScreen(UiApp::ScreenType& screen, void* /*user*/) {
   screen.header("Inkling");
   screen.centeredText("Zzz... premi Power per svegliarmi");
+}
+
+void messageScreen(UiApp::ScreenType& screen, void* user) {
+  screen.header("Inkling");
+  screen.centeredText(static_cast<const char*>(user));
 }
 
 }  // namespace inkling

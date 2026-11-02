@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
   status.az = 0.05f;
   status.lastButton = "Confirm";
   status.buttonPresses = 12;
+  status.otherFirmware = "arduino-lib-builder 1.6.0";
 
   inkling::DeviceStatus fresh;  // first boot: nothing detected yet
 

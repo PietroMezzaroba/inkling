@@ -16,6 +16,7 @@
 #include <SPI.h>
 #include <XteinkDetect.h>
 
+#include "FirmwareSlots.h"
 #include "inkling/Screens.h"
 
 #if INKLING_SERIAL_LOG
@@ -30,6 +31,10 @@ namespace {
 
 // Holding Power this long turns the device off.
 constexpr unsigned long kPowerOffHoldMs = 1000;
+// Holding Back this long on the diagnostic screen restarts into the other slot.
+constexpr unsigned long kOtherSlotHoldMs = 3000;
+// How long Back is sampled at boot for the "hold Back while powering on" escape.
+constexpr unsigned long kBootEscapeSampleMs = 300;
 // How often the clock, battery and IMU are re-read while idle.
 constexpr unsigned long kStatusPollMs = 30000;
 
@@ -47,6 +52,8 @@ inkling::DeviceStatus status;
 // the power-off gesture after it has been released once.
 bool powerArmed = false;
 unsigned long powerPressedAt = 0;
+unsigned long backPressedAt = 0;
+bool backHoldHandled = false;
 unsigned long lastPollMs = 0;
 
 const char* panelName() {
@@ -108,6 +115,29 @@ void renderIfNeeded() {
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
 
+// Samples the buttons briefly so the ADC ladder debounce settles.
+bool backHeldAtBoot() {
+  const unsigned long start = millis();
+  while (millis() - start < kBootEscapeSampleMs) {
+    input.update();
+    delay(5);
+  }
+  return input.isPressed(InputManager::BTN_BACK);
+}
+
+void showMessage(const char* message) {
+  app->setScreen(inkling::messageScreen, const_cast<char*>(message), freeink::ui::RefreshHint::Full);
+  renderIfNeeded();
+}
+
+void bootOtherSlotOrComplain() {
+  LOG("switching to other slot: %s", status.otherFirmware);
+  showMessage("Riavvio nell'altro firmware...");
+  firmware::bootOtherSlot();  // returns only on failure
+  status.notice = "Nessun firmware nell'altro slot";
+  app->setScreen(inkling::diagnosticScreen, &status, freeink::ui::RefreshHint::Full);
+}
+
 void handleButtons() {
   for (uint8_t b = InputManager::BTN_BACK; b <= InputManager::BTN_DOWN; ++b) {
     if (!input.wasPressed(b)) continue;
@@ -116,6 +146,17 @@ void handleButtons() {
     pollStatus();  // fresh IMU values with every press
     app->invalidate();
     LOG("button %s", status.lastButton);
+  }
+
+  if (input.isPressed(InputManager::BTN_BACK)) {
+    if (backPressedAt == 0) backPressedAt = millis();
+    if (!backHoldHandled && millis() - backPressedAt >= kOtherSlotHoldMs) {
+      backHoldHandled = true;
+      bootOtherSlotOrComplain();
+    }
+  } else {
+    backPressedAt = 0;
+    backHoldHandled = false;
   }
 
   const bool powerDown = input.isPressed(InputManager::BTN_POWER);
@@ -138,6 +179,16 @@ void setup() {
   // newer UC8279 batch) and latches the power rails before any pin is used.
   const bool x3Confirmed = freeink::selectXteinkDevice();
 
+  // Escape hatch, checked before anything that could crash: Back held while
+  // powering on restarts into the other slot (e.g. the previous CrossPet).
+  input.begin();
+  status.otherFirmware = firmware::otherSlotName();
+  if (backHeldAtBoot()) {
+    backHoldHandled = true;  // don't fire the long-press again for this same hold
+    firmware::bootOtherSlot();  // returns only on failure
+    status.notice = "Nessun firmware nell'altro slot";
+  }
+
   const auto& pins = BoardConfig::ACTIVE.display;
   // The SD card shares the display's SPI bus on the X3 and only adds MISO.
   SPI.begin(pins.sclk, BoardConfig::ACTIVE.sd.miso, pins.mosi, pins.cs);
@@ -148,8 +199,6 @@ void setup() {
   display = &einkDisplay;
   display->setDisplayX3();
   display->begin();
-
-  input.begin();
 
   static BatteryMonitor batteryMonitor;
   battery = &batteryMonitor;
@@ -169,6 +218,20 @@ void setup() {
   target = &displayTarget;
   app = &uiApp;
   app->setClearColor(freeink::ui::Color::White);
+
+  // SD self-update: works for any ESP32-C3 app, so CrossPet can be put back
+  // the same way by saving its .bin as /inkling.bin.
+  if (status.sdReady && SdMan.exists(firmware::kSdUpdatePath)) {
+    LOG("SD update found: %s", firmware::kSdUpdatePath);
+    showMessage("Aggiornamento dalla scheda SD...");
+    const char* error = "";
+    firmware::installFromSd(firmware::kSdUpdatePath, &error);  // restarts on success
+    LOG("SD update failed: %s", error);
+    static char notice[64];
+    snprintf(notice, sizeof(notice), "Aggiornamento fallito: %s", error);
+    status.notice = notice;
+  }
+
   app->setScreen(inkling::diagnosticScreen, &status, freeink::ui::RefreshHint::Full);
   renderIfNeeded();
 }
