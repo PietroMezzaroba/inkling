@@ -34,8 +34,8 @@ struct ReaderMemory {
 // whatever heap is left: a bigger cache only means fewer re-rasterizations.
 struct GlyphCacheSizes {
   static constexpr size_t kRegularMin = 8 * 1024;    // ~5 KB of it is slot tables
-  static constexpr size_t kRegularIdeal = 16 * 1024;
-  static constexpr size_t kItalic = 6 * 1024;        // optional: without it italic falls back to regular
+  static constexpr size_t kRegularIdeal = 24 * 1024;  // device has ~88 KB free with 16 KB
+  static constexpr size_t kItalic = 8 * 1024;         // optional: without it italic falls back to regular
 };
 
 // Reading typography; changing any field relayouts into a new cache generation.
@@ -97,6 +97,16 @@ class BookReader {
   bool prevPage();
 
   const char* title() const { return title_; }
+  const char* path() const { return path_; }
+
+  // Table of contents (EPUB only; a TXT has none). tocEntry() fills `title`
+  // and returns the chapter's spine index, or -1 if the entry is unusable.
+  size_t tocCount() const;
+  int tocEntry(size_t index, char* title, size_t titleCap, uint8_t* depth) const;
+  // TOC entry of the chapter being read (-1 if none), to preselect it.
+  int currentTocIndex() const;
+  // Moves to the start of a chapter; the next render() lays it out.
+  void jumpToChapter(uint16_t spine);
   uint32_t pageInChapter() const { return page_ + 1; }
   uint32_t pagesInChapter() const { return chapter_.pageCount(); }
   uint8_t percent() const;
@@ -134,6 +144,7 @@ class BookReader {
   bool isText_ = false;
   char cacheDir_[48] = {};
   char title_[96] = {};
+  char path_[128] = {};
   uint32_t generation_ = 0;
   uint16_t spineCount_ = 0;
   uint64_t bookBytes_ = 0;  // sum of spine sizes, for the percentage

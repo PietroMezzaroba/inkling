@@ -23,6 +23,7 @@
 #include "SdStorage.h"
 #include "inkling/App.h"
 #include "inkling/Screens.h"
+#include "inkling/UiGlyphFallback.h"
 
 // Reading faces, embedded in flash by board_build.embed_files and read in place
 // through the flash cache: no RAM copy.
@@ -290,6 +291,13 @@ void setup() {
       fontsOk = reader->initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
                                   kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart),
                                   regularCache, regularLen, italicCache, italicCache ? Glyphs::kItalic : 0);
+    }
+    if (fontsOk) {
+      // UI chrome (menus, titles) draws what its ASCII bitmap font lacks, like
+      // accented letters, with the reading face.
+      static inkling::UiGlyphFallback uiFallback;
+      uiFallback.setFont(&reader->regularFont());
+      displayTarget.setGlyphFallback(&uiFallback);
     }
     LOG("glyph caches: regular %u, italic %u", static_cast<unsigned>(regularCache ? regularLen : 0),
         static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0));

@@ -17,6 +17,7 @@
 #include "PngWriter.h"
 #include "inkling/App.h"
 #include "inkling/Screens.h"
+#include "inkling/UiGlyphFallback.h"
 
 #ifndef INKLING_FONT_DIR
 #define INKLING_FONT_DIR "assets/fonts"
@@ -106,6 +107,9 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
 
   Canvas canvas;
   reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());  // as on the device
+  static inkling::UiGlyphFallback uiFallback;  // accents in menus, as on the device
+  uiFallback.setFont(&reader.regularFont());
+  canvas.target.setGlyphFallback(&uiFallback);
   inkling::DeviceStatus status;
   inkling::UiApp ui(canvas.target, canvas.target.deviceContext());
   ui.setClearColor(freeink::ui::Color::White);
@@ -126,11 +130,35 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
   step("library-down", B::Down);
   step("library-up", B::Up);
   step("open", B::Confirm);
-  for (int i = 0; i < 4; ++i) step("next", B::Right);
-  for (int i = 0; i < 2; ++i) step("prev", B::Left);
+  step("next", B::Right);
+  step("menu", B::Confirm);
+  step("menu-down", B::Down);          // "Indice dei capitoli"
+  step("toc", B::Confirm);
+  step("toc-down", B::Down);
+  step("toc-jump", B::Confirm);        // second chapter
+  step("menu-again", B::Confirm);
+  step("menu-down", B::Down);
+  step("menu-down", B::Down);          // "Testo piu' grande"
+  step("bigger", B::Confirm);
   step("back-to-library", B::Back);
-  step("reopen", B::Confirm);  // must land on the saved page
+
+  // A fresh boot with a last book recorded: reopens it directly.
   app.shutdown();
+  inkling::InklingApp rebooted(storage, &reader, status, ui, frameFor(canvas));
+  rebooted.setPresenter(Recorder::present, &rec);
+  rec.label = "reboot-library";  // closed with Back above: boot shows the library
+  rebooted.begin();
+  rebooted.update();
+  rec.label = "reopen";
+  rebooted.onButton(B::Confirm);
+  rebooted.update();
+  rebooted.shutdown();
+  inkling::InklingApp resumed(storage, &reader, status, ui, frameFor(canvas));
+  resumed.setPresenter(Recorder::present, &rec);
+  rec.label = "reboot-resume";  // powered off while reading: boot reopens the book
+  resumed.begin();
+  resumed.update();
+  resumed.shutdown();
   return 0;
 }
 

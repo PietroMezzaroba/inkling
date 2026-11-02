@@ -18,11 +18,13 @@ enum class Button : uint8_t { Back, Confirm, Left, Right, Up, Down };
 // owns the hardware, feeds buttons in, and pushes frames out through `present`.
 class InklingApp {
  public:
-  enum class Mode : uint8_t { Library, Reader, Diagnostic, Message };
+  enum class Mode : uint8_t { Library, Reader, ReaderMenu, Toc, Diagnostic, Message };
 
   // Pushes the framebuffer to the panel (no-op or PNG dump in the simulator).
   using PresentFn = void (*)(freeink::ui::RefreshHint hint, void* user);
 
+  // `reader` may be null (out of memory): the library and diagnostics still
+  // work, opening a book explains the problem.
   InklingApp(Storage& storage, BookReader* reader, DeviceStatus& status, UiApp& ui,
              const freeink::book::FrameTarget& frame);
 
@@ -39,11 +41,10 @@ class InklingApp {
     requestUser_ = user;
   }
 
-  // `reader` may be null (out of memory): the library and diagnostics still
-  // work, opening a book explains the problem.
-  //
-  // Scans the card and shows the library.
+  // Startup: scans the card, then reopens the last book (unless reopening it
+  // crashed last time) or shows the library.
   void begin();
+  void showLibrary();
   void onButton(Button button);
   // Renders and presents if anything changed since the last frame.
   void update();
@@ -61,16 +62,35 @@ class InklingApp {
   // Screen functions read the app through the `user` pointer.
   static void libraryScreen(UiApp::ScreenType& screen, void* user);
   static void readerScreen(UiApp::ScreenType& screen, void* user);
+  static void readerMenuScreen(UiApp::ScreenType& screen, void* user);
+  static void tocScreen(UiApp::ScreenType& screen, void* user);
 
  private:
+  // A vertical menu with wrap-around selection (library, reader menu, TOC).
+  struct Menu {
+    int selected = 0;
+    int count = 0;
+    freeink::ui::ListNav nav;
+    void reset(int n, int select = 0);
+    void move(int delta);
+  };
+
   void openSelected();
+  bool openBook(const char* path, bool resuming);
   void closeBook();
   void flush(freeink::ui::RefreshHint hint);
-  void moveSelection(int delta);
   void turnPage(bool forward);
+  void showReader(freeink::ui::RefreshHint hint);
+  void showReaderMenu();
+  void showToc();
+  void runMenuItem(int item);
+  void changeFontSize(int delta);
+  void loadPrefs();
+  void savePrefs();
+  void setResumeLock(bool locked);
 
   Storage& storage_;
-  BookReader* reader_;  // null when the reader's memory could not be allocated
+  BookReader* reader_;
   DeviceStatus& status_;
   UiApp& ui_;
   freeink::book::FrameTarget frame_;
@@ -81,12 +101,13 @@ class InklingApp {
 
   Mode mode_ = Mode::Library;
   Library library_;
-  freeink::ui::ListNav nav_;
-  int selected_ = 0;
+  Menu libraryMenu_, readerMenu_, tocMenu_;
   char message_[96] = {};
   freeink::book::BookStatus lastRenderStatus_ = freeink::book::BookStatus::Ok;
   // E-paper ghosting: every Nth page turn is a full refresh.
   uint8_t turnsSinceFull_ = 0;
+  uint8_t fontStep_ = 2;        // index into the font size ladder (see App.cpp)
+  bool resumePending_ = false;  // a resumed book has not drawn its first page yet
 };
 
 }  // namespace inkling

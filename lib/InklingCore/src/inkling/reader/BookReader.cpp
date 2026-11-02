@@ -94,6 +94,7 @@ BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
   if (!cache_) return BookStatus::IoError;
 
   titleFromPath(path, title_, sizeof(title_));
+  snprintf(path_, sizeof(path_), "%s", path);
   params_ = freeink::book::LayoutParams{};
   params_.language = "it";
 
@@ -303,6 +304,30 @@ bool BookReader::prevPage() {
     return true;
   }
   return false;
+}
+
+size_t BookReader::tocCount() const { return open_ && !isText_ ? catalog_.tocCount() : 0; }
+
+int BookReader::tocEntry(size_t index, char* title, size_t titleCap, uint8_t* depth) const {
+  if (index >= tocCount()) return -1;
+  BookCatalog::TocItem item;
+  char fragment[8];  // anchors inside chapters are not used: jumps land on the chapter start
+  if (catalog_.tocItem(index, &item, title, titleCap, fragment, sizeof(fragment)) != BookStatus::Ok) return -1;
+  if (depth) *depth = item.depth;
+  return item.spineIndex;
+}
+
+int BookReader::currentTocIndex() const {
+  return open_ && !isText_ ? catalog_.tocIndexForSpine(pos_.spine) : -1;
+}
+
+void BookReader::jumpToChapter(uint16_t spine) {
+  if (!open_ || spine >= spineCount_) return;
+  pos_.spine = spine;
+  pos_.charStart = 0;
+  wantLastPage_ = false;
+  travel_ = 1;
+  if (loadedSpine_ == spine) page_ = 0;
 }
 
 uint8_t BookReader::percent() const {
