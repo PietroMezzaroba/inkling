@@ -277,11 +277,12 @@ void setup() {
   }
   bool fontsOk = false;
   if (readerMemory) {
-    // stb_truetype mallocs while rasterizing a glyph: an active-edge block of
-    // ~26 KB that must be contiguous (a crash on device when it was not). The
-    // caches are sized so that block always stays available: italic goes first,
-    // then the regular cache shrinks to its minimum.
-    constexpr size_t kRasterReserve = 32 * 1024;
+    // stb_truetype mallocs while rasterizing each glyph (outline, edges,
+    // active-edge chunks). Upstream asked for one ~56 KB block and crashed the
+    // device; third_party/stb-patched keeps chunks at ~2 KB, so a modest
+    // contiguous reserve is enough. Italic goes first, then the regular cache
+    // shrinks to its minimum.
+    constexpr size_t kRasterReserve = 8 * 1024;
     auto fits = [&](size_t len) {
       return ESP.getMaxAllocHeap() >= len + kRasterReserve && spare() >= len + kRasterReserve;
     };

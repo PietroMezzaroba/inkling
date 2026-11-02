@@ -26,7 +26,15 @@ set(BOOK_INCLUDES
 file(GLOB BOOK_VENDOR_SOURCES "${FREEINK_BOOK}/src/vendor/*.c")
 file(GLOB_RECURSE BOOK_SOURCES CONFIGURE_DEPENDS "${FREEINK_BOOK}/src/*.cpp")
 add_library(freeinkbook STATIC ${BOOK_VENDOR_SOURCES} ${BOOK_SOURCES})
+# Same patched stb_truetype as the firmware (see third_party/stb-patched), and
+# device-sized allocation limits for it (StbAllocLimit.h).
+option(INKLING_SIM_STOCK_STB "Use the SDK's unpatched stb_truetype (to check the limit fires)" OFF)
+if(NOT INKLING_SIM_STOCK_STB)
+  target_include_directories(freeinkbook BEFORE PUBLIC ${REPO_ROOT}/third_party/stb-patched)
+endif()
 target_include_directories(freeinkbook PUBLIC ${BOOK_INCLUDES})
+set_source_files_properties(${FREEINK_BOOK}/src/render/TtfFont.cpp PROPERTIES
+  COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/StbAllocLimit.h")
 target_compile_definitions(freeinkbook PUBLIC FREEINK_BOOK_SMALL=1)
 set_source_files_properties(${BOOK_VENDOR_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 
