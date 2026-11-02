@@ -1,0 +1,8 @@
+{
+  "name": "InklingCore",
+  "version": "0.1.0",
+  "description": "Portable Inkling code: screens and app logic. No Arduino or ESP-IDF dependency, so it also builds in the host simulator and tests.",
+  "dependencies": {},
+  "platforms": "*",
+  "frameworks": "*"
+}

@@ -1,0 +1,6 @@
+.pio/
+.cache/
+build/
+sim/out/
+.vscode/
+platformio.local.ini
