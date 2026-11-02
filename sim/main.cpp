@@ -88,6 +88,9 @@ struct Recorder {
 };
 
 inkling::ReaderMemory readerMemory;  // same budget as the device
+// Glyph caches at their ideal size, as on a device with heap to spare.
+alignas(16) uint8_t glyphsRegular[inkling::GlyphCacheSizes::kRegularIdeal];
+alignas(16) uint8_t glyphsItalic[inkling::GlyphCacheSizes::kItalic];
 
 int runTour(const std::string& cardDir, const std::string& outDir) {
   Fonts fonts;
@@ -98,7 +101,8 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
   sim::HostStorage storage(cardDir);
   inkling::BookReader reader(storage, readerMemory);
   reader.initFonts(fonts.regular.data(), static_cast<uint32_t>(fonts.regular.size()), fonts.italic.data(),
-                   static_cast<uint32_t>(fonts.italic.size()));
+                   static_cast<uint32_t>(fonts.italic.size()), glyphsRegular, sizeof(glyphsRegular), glyphsItalic,
+                   sizeof(glyphsItalic));
 
   Canvas canvas;
   reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());  // as on the device
@@ -135,7 +139,8 @@ int runCheck(const std::string& cardDir) {
   sim::HostStorage storage(cardDir);
   inkling::BookReader reader(storage, readerMemory);
   reader.initFonts(fonts.regular.data(), static_cast<uint32_t>(fonts.regular.size()), fonts.italic.data(),
-                   static_cast<uint32_t>(fonts.italic.size()));
+                   static_cast<uint32_t>(fonts.italic.size()), glyphsRegular, sizeof(glyphsRegular), glyphsItalic,
+                   sizeof(glyphsItalic));
   Canvas canvas;
   reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());  // as on the device
   const auto frame = frameFor(canvas);

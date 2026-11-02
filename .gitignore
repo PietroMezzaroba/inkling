@@ -13,3 +13,4 @@ sdkconfig.*
 dependencies.lock
 CMakeLists.txt
 !sim/CMakeLists.txt
+sdkconfig.*

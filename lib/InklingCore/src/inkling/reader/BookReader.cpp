@@ -60,15 +60,19 @@ BookReader::BookReader(Storage& storage, ReaderMemory& memory) : storage_(storag
   catalogArena_.init(mem_.catalog, sizeof(mem_.catalog));
   scratch_.init(mem_.scratch, sizeof(mem_.scratch));
   index_.init(mem_.index, sizeof(mem_.index));
-  glyphsRegular_.init(mem_.glyphsRegular, sizeof(mem_.glyphsRegular));
-  glyphsItalic_.init(mem_.glyphsItalic, sizeof(mem_.glyphsItalic));
 }
 
-bool BookReader::initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen) {
+bool BookReader::initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen,
+                           uint8_t* regularCache, size_t regularCacheLen, uint8_t* italicCache,
+                           size_t italicCacheLen) {
+  glyphsRegular_.init(regularCache, regularCacheLen);
   if (!regular_.init(regular, regularLen, glyphsRegular_)) return false;
   fonts_.add(&regular_, freeink::book::StyleNone);
   // Italic is optional; bold is synthesized from whichever face is active.
-  if (italic && italic_.init(italic, italicLen, glyphsItalic_)) fonts_.add(&italic_, freeink::book::StyleItalic);
+  if (italic && italicCache) {
+    glyphsItalic_.init(italicCache, italicCacheLen);
+    if (italic_.init(italic, italicLen, glyphsItalic_)) fonts_.add(&italic_, freeink::book::StyleItalic);
+  }
   return true;
 }
 

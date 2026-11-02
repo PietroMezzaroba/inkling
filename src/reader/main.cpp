@@ -257,24 +257,42 @@ void setup() {
   frame.format = freeink::book::FrameFormat::Mono1Dithered;
   frame.rotation = freeink::book::FrameRotation::Portrait;
 
-  // Reader arenas: one block, right after the framebuffer. If it does not fit
-  // the device still boots into the library and diagnostics.
-  // Keep a floor of free heap for SD, UI and system tasks; without it a later
-  // small allocation would fail somewhere far less obvious than here.
-  constexpr size_t kHeapFloor = 20 * 1024;
+  // Reader memory, right after the framebuffer while the heap is one block:
+  // the fixed arenas first, then glyph caches sized from what is left. If even
+  // the minimum does not fit, the device still boots into library and
+  // diagnostics. A floor of free heap stays for SD, UI and system tasks:
+  // without it a later small allocation would fail somewhere far less obvious.
+  constexpr size_t kHeapFloor = 16 * 1024;
+  using Glyphs = inkling::GlyphCacheSizes;
+  auto spare = [] {
+    const size_t free = ESP.getFreeHeap();
+    return free > kHeapFloor ? free - kHeapFloor : 0;
+  };
+  LOG("heap before reader: free %u, max block %u", static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(ESP.getMaxAllocHeap()));
   if (ESP.getMaxAllocHeap() >= sizeof(inkling::ReaderMemory) &&
-      ESP.getFreeHeap() >= sizeof(inkling::ReaderMemory) + kHeapFloor) {
+      spare() >= sizeof(inkling::ReaderMemory) + Glyphs::kRegularMin) {
     readerMemory = new (std::nothrow) inkling::ReaderMemory;
   }
   bool fontsOk = false;
   if (readerMemory) {
+    size_t regularLen = spare() >= Glyphs::kRegularIdeal ? Glyphs::kRegularIdeal : Glyphs::kRegularMin;
+    uint8_t* regularCache = static_cast<uint8_t*>(malloc(regularLen));
+    uint8_t* italicCache = nullptr;
+    if (regularCache && spare() >= Glyphs::kItalic) italicCache = static_cast<uint8_t*>(malloc(Glyphs::kItalic));
+
     static inkling::BookReader bookReader(storage, *readerMemory);
     reader = &bookReader;
     // Parsing borrows the framebuffer while a chapter is laid out.
     reader->setParseBuffer(display->getFrameBuffer(),
                            static_cast<size_t>(display->getDisplayWidthBytes()) * display->getDisplayHeight());
-    fontsOk = reader->initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
-                                kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart));
+    if (regularCache) {
+      fontsOk = reader->initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
+                                  kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart),
+                                  regularCache, regularLen, italicCache, italicCache ? Glyphs::kItalic : 0);
+    }
+    LOG("glyph caches: regular %u, italic %u", static_cast<unsigned>(regularCache ? regularLen : 0),
+        static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0));
   } else {
     status.notice = "Memoria insufficiente per il lettore";
   }

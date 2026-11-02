@@ -21,17 +21,21 @@ struct ReaderMemory {
   // as parse arena (setParseBuffer): catalog 16.5 KB, scratch 49.6 KB, index
   // 5.6 KB, parse 49.1 KB of the 52 KB framebuffer. On the ESP32-C3 every KB
   // here is heap the framebuffer, the loop stack and Wi-Fi also need.
-  static constexpr size_t kCatalog = 18 * 1024;        // resident catalog tables
-  static constexpr size_t kScratch = 52 * 1024;        // layout state, catalog tables, page decode
-  static constexpr size_t kIndex = 8 * 1024;           // chapter page index (8 B/page): chapters up to ~1,000 pages
-  static constexpr size_t kGlyphsRegular = 16 * 1024;  // glyph cache of the body face (~5 KB of it is slot tables)
-  static constexpr size_t kGlyphsItalic = 6 * 1024;    // italic is rarer: a smaller cache that refills more often
+  static constexpr size_t kCatalog = 18 * 1024;  // resident catalog tables
+  static constexpr size_t kScratch = 52 * 1024;  // layout state, catalog tables, page decode
+  static constexpr size_t kIndex = 8 * 1024;     // chapter page index (8 B/page): chapters up to ~1,000 pages
 
   alignas(16) uint8_t catalog[kCatalog];
   alignas(16) uint8_t scratch[kScratch];
   alignas(16) uint8_t index[kIndex];
-  alignas(16) uint8_t glyphsRegular[kGlyphsRegular];
-  alignas(16) uint8_t glyphsItalic[kGlyphsItalic];
+};
+
+// Glyph caches live outside ReaderMemory so the platform can size them from
+// whatever heap is left: a bigger cache only means fewer re-rasterizations.
+struct GlyphCacheSizes {
+  static constexpr size_t kRegularMin = 8 * 1024;    // ~5 KB of it is slot tables
+  static constexpr size_t kRegularIdeal = 16 * 1024;
+  static constexpr size_t kItalic = 6 * 1024;        // optional: without it italic falls back to regular
 };
 
 // Reading typography; changing any field relayouts into a new cache generation.
@@ -59,7 +63,10 @@ class BookReader {
 
   // Loads the two reading faces. `data` must stay addressable for the reader's
   // lifetime (flash-mapped on the device).
-  bool initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen);
+  // Glyph caches are borrowed too (see GlyphCacheSizes); pass a null italic
+  // cache to render italic with the regular face.
+  bool initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen,
+                 uint8_t* regularCache, size_t regularCacheLen, uint8_t* italicCache, size_t italicCacheLen);
   freeink::book::TtfFont& regularFont() { return regular_; }
 
   // Opens a book (EPUB or TXT), building its catalog on first open, and
