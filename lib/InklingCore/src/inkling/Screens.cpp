@@ -88,4 +88,34 @@ void messageScreen(UiApp::ScreenType& screen, void* user) {
   screen.centeredText(static_cast<const char*>(user));
 }
 
+void otaScreen(UiApp::ScreenType& screen, void* user) {
+  const auto& v = *static_cast<const OtaView*>(user);
+  static char state[48];
+  if (v.progress >= 0) {
+    snprintf(state, sizeof(state), "%s %d%%", v.state, v.progress);
+  } else {
+    snprintf(state, sizeof(state), "%s", v.state);
+  }
+  const char* cells[] = {
+      "Rete",      v.network,  //
+      "Indirizzo", v.address,  //
+      "Stato",     state,      //
+      "Versione",  v.version,
+  };
+  screen.header("Aggiornamento Wi-Fi");
+  screen.spacer(16);
+  freeink::ui::TableProps table;
+  table.cells = cells;
+  table.rows = 4;
+  table.cols = 2;
+  table.rowHeight = 52;
+  table.padding = 8;
+  screen.table(table);
+
+  const freeink::ui::FooterAction hints[] = {
+      {.label = "Back: esci", .enabled = false},
+  };
+  screen.footer(hints, 1, freeink::ui::LayoutAnchor::Bottom);
+}
+
 }  // namespace inkling

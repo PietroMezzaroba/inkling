@@ -23,7 +23,7 @@ class InklingApp {
   // Pushes the framebuffer to the panel (no-op or PNG dump in the simulator).
   using PresentFn = void (*)(freeink::ui::RefreshHint hint, void* user);
 
-  InklingApp(Storage& storage, BookReader& reader, DeviceStatus& status, UiApp& ui,
+  InklingApp(Storage& storage, BookReader* reader, DeviceStatus& status, UiApp& ui,
              const freeink::book::FrameTarget& frame);
 
   void setPresenter(PresentFn fn, void* user) {
@@ -31,6 +31,17 @@ class InklingApp {
     presentUser_ = user;
   }
 
+  // Things only the platform can do (restart into another boot mode).
+  enum class Request : uint8_t { WifiUpdate };
+  using RequestFn = void (*)(Request request, void* user);
+  void setRequestHandler(RequestFn fn, void* user) {
+    request_ = fn;
+    requestUser_ = user;
+  }
+
+  // `reader` may be null (out of memory): the library and diagnostics still
+  // work, opening a book explains the problem.
+  //
   // Scans the card and shows the library.
   void begin();
   void onButton(Button button);
@@ -59,12 +70,14 @@ class InklingApp {
   void turnPage(bool forward);
 
   Storage& storage_;
-  BookReader& reader_;
+  BookReader* reader_;  // null when the reader's memory could not be allocated
   DeviceStatus& status_;
   UiApp& ui_;
   freeink::book::FrameTarget frame_;
   PresentFn present_ = nullptr;
   void* presentUser_ = nullptr;
+  RequestFn request_ = nullptr;
+  void* requestUser_ = nullptr;
 
   Mode mode_ = Mode::Library;
   Library library_;

@@ -54,9 +54,16 @@ void Library::onEntry(const char* name, bool isDir, void* user) {
   const bool root = strcmp(self.scanDir_, "/") == 0;
   const int n = snprintf(e.path, sizeof(e.path), "%s/%s", root ? "" : self.scanDir_, name);
   if (n <= 0 || n >= static_cast<int>(sizeof(e.path))) return;  // path too long: skip it
-  snprintf(e.name, sizeof(e.name), "%s", name);
-  char* dot = strrchr(e.name, '.');
-  if (dot && dot != e.name) *dot = '\0';
+  // Display name: drop the extension, then cut to fit without splitting a
+  // UTF-8 sequence (accented titles are common).
+  const char* dotInName = strrchr(name, '.');
+  size_t len = dotInName && dotInName != name ? static_cast<size_t>(dotInName - name) : strlen(name);
+  if (len > sizeof(e.name) - 1) {
+    len = sizeof(e.name) - 1;
+    while (len > 0 && (static_cast<unsigned char>(name[len]) & 0xC0) == 0x80) --len;
+  }
+  memcpy(e.name, name, len);
+  e.name[len] = '\0';
   self.count_++;
 }
 

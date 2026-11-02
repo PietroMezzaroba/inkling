@@ -101,10 +101,11 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
                    static_cast<uint32_t>(fonts.italic.size()));
 
   Canvas canvas;
+  reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());  // as on the device
   inkling::DeviceStatus status;
   inkling::UiApp ui(canvas.target, canvas.target.deviceContext());
   ui.setClearColor(freeink::ui::Color::White);
-  inkling::InklingApp app(storage, reader, status, ui, frameFor(canvas));
+  inkling::InklingApp app(storage, &reader, status, ui, frameFor(canvas));
   Recorder rec{&canvas, outDir, "", 0};
   app.setPresenter(Recorder::present, &rec);
 
@@ -136,6 +137,7 @@ int runCheck(const std::string& cardDir) {
   reader.initFonts(fonts.regular.data(), static_cast<uint32_t>(fonts.regular.size()), fonts.italic.data(),
                    static_cast<uint32_t>(fonts.italic.size()));
   Canvas canvas;
+  reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());  // as on the device
   const auto frame = frameFor(canvas);
 
   static inkling::Library library;
@@ -156,9 +158,10 @@ int runCheck(const std::string& cardDir) {
     if (st != freeink::book::BookStatus::Ok) ++failures;
     reader.close();
   }
-  std::printf("arena peaks: scratch %zu / %zu, catalog %zu / %zu, index %zu / %zu bytes\n",
+  std::printf("arena peaks: scratch %zu / %zu, catalog %zu / %zu, index %zu / %zu, parse %zu / %zu bytes\n",
               reader.scratchHighWater(), inkling::ReaderMemory::kScratch, reader.catalogHighWater(),
-              inkling::ReaderMemory::kCatalog, reader.indexHighWater(), inkling::ReaderMemory::kIndex);
+              inkling::ReaderMemory::kCatalog, reader.indexHighWater(), inkling::ReaderMemory::kIndex,
+              reader.parseHighWater(), canvas.fb.size());
   return failures ? 1 : 0;
 }
 

@@ -20,4 +20,14 @@ void sleepScreen(UiApp::ScreenType& screen, void* user);
 // Full-screen message; `user` must point to a NUL-terminated string.
 void messageScreen(UiApp::ScreenType& screen, void* user);
 
+// What the Wi-Fi update mode shows; `user` must point to an OtaView.
+struct OtaView {
+  const char* network = "";
+  char address[48] = {};
+  const char* state = "";
+  const char* version = "";
+  int8_t progress = -1;  // percent while receiving firmware, -1 otherwise
+};
+void otaScreen(UiApp::ScreenType& screen, void* user);
+
 }  // namespace inkling

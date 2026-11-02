@@ -16,18 +16,14 @@
 #include <SPI.h>
 #include <XteinkDetect.h>
 
+#include <new>
+
+#include "DeviceLog.h"
 #include "FirmwareSlots.h"
+#include "OtaMode.h"
 #include "SdStorage.h"
 #include "inkling/App.h"
 #include "inkling/Screens.h"
-
-#if INKLING_SERIAL_LOG
-#define LOG(fmt, ...) Serial.printf("[%lu] " fmt "\n", millis(), ##__VA_ARGS__)
-#else
-#define LOG(...) \
-  do {           \
-  } while (0)
-#endif
 
 // Reading faces, embedded in flash by board_build.embed_files and read in place
 // through the flash cache: no RAM copy.
@@ -54,8 +50,12 @@ freeink::Imu imu;
 BatteryMonitor* battery = nullptr;
 
 SdStorage storage;
-inkling::ReaderMemory readerMemory;  // ~200 KB of fixed arenas, see BookReader.h
-inkling::BookReader reader(storage, readerMemory);
+// ~112 KB of reader arenas (see BookReader.h), taken from the heap at boot
+// right after the framebuffer, while the heap is still one unfragmented block.
+// Heap rather than .bss so a future boot mode without the reader (Wi-Fi
+// updates) gets this RAM back.
+inkling::ReaderMemory* readerMemory = nullptr;
+inkling::BookReader* reader = nullptr;
 inkling::UiApp* ui = nullptr;
 inkling::InklingApp* app = nullptr;
 inkling::DeviceStatus status;
@@ -133,6 +133,26 @@ void renderNow() {
   freeink::PowerManager::deepSleepUntilPowerButton();
 }
 
+void showOtaView(const inkling::OtaView& view, void*) {
+  static inkling::OtaView shown;
+  shown = view;
+  ui->setScreen(inkling::otaScreen, &shown, freeink::ui::RefreshHint::Fast);
+  renderNow();
+}
+
+bool backPressedNow(void*) {
+  input.update();
+  return input.wasPressed(InputManager::BTN_BACK);
+}
+
+void onAppRequest(inkling::InklingApp::Request request, void*) {
+  if (request == inkling::InklingApp::Request::WifiUpdate) {
+    LOG("restarting into Wi-Fi update mode");
+    app->shutdown();
+    ota::restartIntoUpdateMode();
+  }
+}
+
 // Samples the buttons briefly so the ADC ladder debounce settles.
 bool backHeldAtBoot() {
   const unsigned long start = millis();
@@ -192,6 +212,8 @@ void handleButtons() {
 
 void setup() {
   Serial.begin(115200);
+  devlog::begin();
+  const bool updateMode = ota::consumeUpdateModeRequest();
 
   // Board detection must come first: it picks the X3 profile (UC8253 or the
   // newer UC8279 batch) and latches the power rails before any pin is used.
@@ -236,20 +258,51 @@ void setup() {
   ui = &uiApp;
   ui->setClearColor(freeink::ui::Color::White);
 
+  // Wi-Fi update mode: no reader arenas, so the Wi-Fi stack gets the heap.
+  if (updateMode) {
+    static ota::Config config;
+    if (ota::loadConfig(config)) {
+      LOG("update mode, free heap %u", static_cast<unsigned>(ESP.getFreeHeap()));
+      ota::run(config, ota::Hooks{showOtaView, backPressedNow, nullptr});  // never returns
+    }
+    LOG("update mode: missing %s", ota::kConfigPath);
+    status.notice = "Manca /.inkling/wifi.txt sulla scheda";
+  }
+
   freeink::book::FrameTarget frame{display->getFrameBuffer(), static_cast<int16_t>(display->getDisplayWidth()),
                                    static_cast<int16_t>(display->getDisplayHeight()),
                                    static_cast<int16_t>(display->getDisplayWidthBytes())};
   frame.format = freeink::book::FrameFormat::Mono1Dithered;
   frame.rotation = freeink::book::FrameRotation::Portrait;
 
+  // Reader arenas: one block, right after the framebuffer. If it does not fit
+  // the device still boots into the library and diagnostics.
+  // Keep a floor of free heap for SD, UI and system tasks; without it a later
+  // small allocation would fail somewhere far less obvious than here.
+  constexpr size_t kHeapFloor = 20 * 1024;
+  if (ESP.getMaxAllocHeap() >= sizeof(inkling::ReaderMemory) &&
+      ESP.getFreeHeap() >= sizeof(inkling::ReaderMemory) + kHeapFloor) {
+    readerMemory = new (std::nothrow) inkling::ReaderMemory;
+  }
+  bool fontsOk = false;
+  if (readerMemory) {
+    static inkling::BookReader bookReader(storage, *readerMemory);
+    reader = &bookReader;
+    // Parsing borrows the framebuffer while a chapter is laid out.
+    reader->setParseBuffer(display->getFrameBuffer(),
+                           static_cast<size_t>(display->getDisplayWidthBytes()) * display->getDisplayHeight());
+    fontsOk = reader->initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
+                                kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart));
+  } else {
+    status.notice = "Memoria insufficiente per il lettore";
+  }
+  LOG("reader memory: %s (%u bytes), fonts: %d, free heap %u", readerMemory ? "ok" : "FAILED",
+      static_cast<unsigned>(sizeof(inkling::ReaderMemory)), fontsOk, static_cast<unsigned>(ESP.getFreeHeap()));
+
   static inkling::InklingApp inklingApp(storage, reader, status, uiApp, frame);
   app = &inklingApp;
   app->setPresenter(presentFrame, nullptr);
-
-  const bool fontsOk = reader.initFonts(kFontRegularStart, static_cast<uint32_t>(kFontRegularEnd - kFontRegularStart),
-                                        kFontItalicStart, static_cast<uint32_t>(kFontItalicEnd - kFontItalicStart));
-  LOG("fonts: %d (%u + %u bytes)", fontsOk, static_cast<unsigned>(kFontRegularEnd - kFontRegularStart),
-      static_cast<unsigned>(kFontItalicEnd - kFontItalicStart));
+  app->setRequestHandler(onAppRequest, nullptr);
 
   // SD self-update: works for any ESP32-C3 app, so CrossPet can be put back
   // the same way by saving its .bin as /inkling.bin.

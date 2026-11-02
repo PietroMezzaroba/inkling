@@ -17,14 +17,15 @@ namespace inkling {
 // Fixed memory for one open book. Firmware and simulator use the same sizes, so
 // a book that opens in the simulator fits on the device too.
 struct ReaderMemory {
-  // Peaks measured on a 5-book corpus (4,279 pages): catalog 16.5 KB,
-  // scratch 96.4 KB, index 5.6 KB. The ESP32-C3 heap still has to hold the
-  // 52 KB framebuffer and the 16 KB loop stack, so there is no slack to waste.
-  static constexpr size_t kCatalog = 24 * 1024;        // resident catalog tables
-  static constexpr size_t kScratch = 104 * 1024;       // layout, catalog build, page decode
-  static constexpr size_t kIndex = 12 * 1024;          // chapter page index (8 B/page) while writing and reading
-  static constexpr size_t kGlyphsRegular = 20 * 1024;  // glyph cache of the body face
-  static constexpr size_t kGlyphsItalic = 10 * 1024;   // italic is rarer: a smaller cache that refills more often
+  // Peaks measured on a 5-book corpus (4,279 pages) with the framebuffer lent
+  // as parse arena (setParseBuffer): catalog 16.5 KB, scratch 49.6 KB, index
+  // 5.6 KB, parse 49.1 KB of the 52 KB framebuffer. On the ESP32-C3 every KB
+  // here is heap the framebuffer, the loop stack and Wi-Fi also need.
+  static constexpr size_t kCatalog = 18 * 1024;        // resident catalog tables
+  static constexpr size_t kScratch = 52 * 1024;        // layout state, catalog tables, page decode
+  static constexpr size_t kIndex = 8 * 1024;           // chapter page index (8 B/page): chapters up to ~1,000 pages
+  static constexpr size_t kGlyphsRegular = 16 * 1024;  // glyph cache of the body face (~5 KB of it is slot tables)
+  static constexpr size_t kGlyphsItalic = 6 * 1024;    // italic is rarer: a smaller cache that refills more often
 
   alignas(16) uint8_t catalog[kCatalog];
   alignas(16) uint8_t scratch[kScratch];
@@ -67,6 +68,19 @@ class BookReader {
   void close();
   bool isOpen() const { return open_; }
 
+  // Lends the reader a buffer for streaming parse state (inflate window, XML
+  // buffers) during catalog builds and chapter layout. The framebuffer works:
+  // its content is not needed while a chapter is being laid out, and render()
+  // clears it again before drawing. Without it, parse state comes from scratch.
+  void setParseBuffer(uint8_t* buffer, size_t len) {
+    parseBuffer_ = buffer;
+    parse_.init(buffer, len);
+  }
+
+  // Lays out the current chapter if it is not cached yet. render() does this
+  // too; calling it first keeps slow work out of the UI frame.
+  BookStatus prepare() { return ensureChapter(); }
+
   // Lays out the current chapter if needed and draws the current page.
   BookStatus render(const freeink::book::FrameTarget& frame);
 
@@ -86,6 +100,7 @@ class BookReader {
   size_t scratchHighWater() const { return scratch_.highWater(); }
   size_t catalogHighWater() const { return catalogArena_.highWater(); }
   size_t indexHighWater() const { return index_.highWater(); }
+  size_t parseHighWater() const { return parse_.highWater(); }
 
  private:
   BookStatus ensureChapter();
@@ -96,6 +111,9 @@ class BookReader {
   Storage& storage_;
   ReaderMemory& mem_;
   freeink::book::Arena catalogArena_, scratch_, index_, glyphsRegular_, glyphsItalic_;
+  freeink::book::Arena parse_;  // borrowed (see setParseBuffer); empty if none
+  uint8_t* parseBuffer_ = nullptr;
+  bool parseUsed_ = false;      // the parse buffer holds garbage since the last render
   freeink::book::TtfFont regular_, italic_;
   freeink::book::FontChain fonts_;
 

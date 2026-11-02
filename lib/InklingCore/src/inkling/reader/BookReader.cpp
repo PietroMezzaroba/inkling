@@ -103,7 +103,9 @@ BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
     if (st != BookStatus::Ok && st != BookStatus::OutOfMemory) {
       // First open (or the file changed): index the container once.
       scratch_.reset();
-      st = BookCatalog::build(*source_, *cache_, scratch_);
+      parse_.reset();
+      parseUsed_ = parse_.capacity() > 0;
+      st = BookCatalog::build(*source_, *cache_, scratch_, parse_.capacity() ? &parse_ : nullptr);
       scratch_.reset();
       if (st != BookStatus::Ok) return st;
       catalogArena_.reset();
@@ -171,8 +173,10 @@ BookStatus BookReader::layoutChapter(const char* cacheName) {
     st = catalog_.spineHref(pos_.spine, href, sizeof(href));
     if (st == BookStatus::Ok) st = catalog_.spineEntry(pos_.spine, &entry);
     if (st == BookStatus::Ok) {
+      parse_.reset();
+      parseUsed_ = parseUsed_ || parse_.capacity() > 0;
       st = ChapterLayout::layout(*source_, catalog_.zip(), entry, href, params_, scratch_, writer, nullptr,
-                                 &totalChars);
+                                 &totalChars, parse_.capacity() ? &parse_ : nullptr);
     }
   }
   writer.setTotalChars(totalChars);
@@ -231,6 +235,11 @@ BookStatus BookReader::ensureChapter() {
 BookStatus BookReader::render(const freeink::book::FrameTarget& frame) {
   if (!open_) return BookStatus::NotFound;
   BookStatus st = ensureChapter();
+  // If layout borrowed the framebuffer for parsing, wipe what it left behind.
+  if (parseUsed_ && frame.framebuffer == parseBuffer_) {
+    memset(frame.framebuffer, 0xFF, static_cast<size_t>(frame.widthBytes) * frame.height);
+  }
+  parseUsed_ = false;
   if (st != BookStatus::Ok) return st;
   const uint32_t count = chapter_.pageCount();
   if (count == 0) return BookStatus::Ok;
