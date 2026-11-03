@@ -201,6 +201,8 @@ void renderNow() {
   presentFrame(ui->lastRenderRefreshHint(), nullptr);
 }
 
+RTC_DATA_ATTR bool rtcDeviceWasSleeping = false;
+
 [[noreturn]] void powerOff() {
   LOG("power off");
   display->completeDisplay();
@@ -210,6 +212,9 @@ void renderNow() {
   display->completeDisplay();
   display->deepSleep();
   imu.sleep();
+
+  // Remember that the device was placed into sleep with the lock screen displayed
+  rtcDeviceWasSleeping = true;
 
   // On the X3 this also drives GPIO13 low, which cuts the SD rail and the
   // battery switch: on battery the device is truly off and the next Power press
@@ -327,6 +332,39 @@ void setup() {
   // Escape hatch, checked before anything that could crash: Back held while
   // powering on restarts into the other slot (e.g. the previous CrossPet).
   input.begin();
+
+  // Spurious wake-up filter: if the device was asleep (lock screen displayed),
+  // unplugging or plugging the USB charger causes a momentary power transient
+  // that can wake the MCU. Verify that the Power button is held intentionally.
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  if (rtcDeviceWasSleeping) {
+    const int8_t pPin = BoardConfig::ACTIVE.input.power;
+    const bool pActiveHigh = BoardConfig::ACTIVE.input.powerActiveHigh;
+    const int pressedLevel = pActiveHigh ? HIGH : LOW;
+    pinMode(pPin, pActiveHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
+
+    bool intentionalWake = false;
+    for (int i = 0; i < 8; ++i) {
+      if (digitalRead(pPin) == pressedLevel) {
+        intentionalWake = true;
+        break;
+      }
+      delay(5);
+    }
+
+    if (!intentionalWake) {
+      LOG("spurious wake while asleep (reset reason %d, charger unplugged/plugged), returning to sleep",
+          static_cast<int>(resetReason));
+      // Return immediately to sleep: DO NOT touch display, SPI, SD card, or UI!
+      // The lock screen remains intact on the bistable E-Ink panel.
+      freeink::PowerManager::powerDownRailsForSleep();
+      freeink::PowerManager::deepSleepUntilPowerButton();
+    }
+
+    // Intentional wake-up: clear flag and continue normal boot
+    rtcDeviceWasSleeping = false;
+  }
+
   status.otherFirmware = firmware::otherSlotName();
   const bool backHeld = backHeldAtBoot();
   if (backHeld) {

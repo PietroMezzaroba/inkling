@@ -23,6 +23,7 @@
 
 #include "DeviceLog.h"
 #include "FirmwareSlots.h"
+#include "PrivateConfig.h"
 
 #ifndef INKLING_VERSION
 #define INKLING_VERSION "dev"
@@ -1013,6 +1014,7 @@ bool loadConfig(Config& out) {
 
   if (SdMan.ready()) {
     FsFile f = SdMan.open(kConfigPath, O_RDONLY);
+    if (!f) f = SdMan.open("/wifi.txt", O_RDONLY);
     if (f) {
       char line[160];
       char curSsid[64] = {};
@@ -1061,17 +1063,21 @@ bool loadConfig(Config& out) {
     }
   }
 
-  // Registra eventuali reti di default (da build flag in platformio.local.ini o configurate in /.inkling/wifi.txt)
-#ifdef INKLING_DEFAULT_SSID
-  addNetwork(INKLING_DEFAULT_SSID, INKLING_DEFAULT_PASS);
-#endif
+  // Registra reti di default (da PrivateConfig.local.h o precompilate)
+  if (strlen(INKLING_DEFAULT_SSID_1) > 0) {
+    addNetwork(INKLING_DEFAULT_SSID_1, INKLING_DEFAULT_PASS_1);
+  }
+  if (strlen(INKLING_DEFAULT_SSID_2) > 0) {
+    addNetwork(INKLING_DEFAULT_SSID_2, INKLING_DEFAULT_PASS_2);
+  }
 
   if (out.token[0] == '\0') {
     snprintf(out.token, sizeof(out.token), "1428b87619e23b52529fa0d9a200705b");
   }
 
   // Auto-sync / create /.inkling/wifi.txt on microSD
-  if (SdMan.ready()) {
+  if (SdMan.ready() && out.networkCount > 0) {
+    SdMan.mkdir("/.inkling");
     FsFile f = SdMan.open(kConfigPath, O_WRONLY | O_CREAT | O_TRUNC);
     if (f) {
       char header[128];
@@ -1095,9 +1101,9 @@ void run(const Config& config, const Hooks& hooks) {
   if (!spiMutex) spiMutex = xSemaphoreCreateMutex();
 
   inkling::OtaView view;
-  view.network = "Scansione reti...";
+  view.network = "Connessione Wi-Fi...";
   view.version = INKLING_VERSION;
-  view.state = "Ricerca Wi-Fi 2.4 GHz...";
+  view.state = "Avvio modulo radio...";
   snprintf(view.address, sizeof(view.address), "-");
   hooks.show(view, hooks.user);
 
@@ -1107,60 +1113,69 @@ void run(const Config& config, const Hooks& hooks) {
 
   bool connected = false;
 
-  // 1. Scansione attiva dell'etere: aggancia subito la rete nota presente con segnale migliore
-  const int nFound = WiFi.scanNetworks(false, false, false, 300);
-  LOG("ota: scansione etere: trovate %d reti", nFound);
+  // 1. Tentativo di connessione diretta alle reti note (immediato, 1-2 secondi)
+  for (int i = 0; i < config.networkCount && !connected; ++i) {
+    view.network = config.networks[i].ssid;
+    char stateMsg[64];
+    snprintf(stateMsg, sizeof(stateMsg), "Connessione a %s...", config.networks[i].ssid);
+    view.state = stateMsg;
+    hooks.show(view, hooks.user);
 
-  for (int s = 0; s < nFound && !connected; ++s) {
-    const String scannedSsid = WiFi.SSID(s);
-    for (int i = 0; i < config.networkCount; ++i) {
-      if (scannedSsid == config.networks[i].ssid) {
-        LOG("ota: trovata rete nota '%s' (RSSI %d)", config.networks[i].ssid, WiFi.RSSI(s));
-        view.network = config.networks[i].ssid;
-        char stateMsg[64];
-        snprintf(stateMsg, sizeof(stateMsg), "Connessione a %s...", config.networks[i].ssid);
-        view.state = stateMsg;
-        hooks.show(view, hooks.user);
-
-        WiFi.begin(config.networks[i].ssid, config.networks[i].password);
-        const unsigned long start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
-          if (hooks.backPressed(hooks.user)) leave();
-          delay(100);
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-          connected = true;
-          config.activeIdx = i;
-          break;
-        }
-      }
+    LOG("ota: tentativo diretto rete %d/%d: '%s'", i + 1, config.networkCount, config.networks[i].ssid);
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.begin(config.networks[i].ssid, config.networks[i].password);
+    const unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+      if (hooks.backPressed(hooks.user)) leave();
+      delay(100);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      config.activeIdx = i;
+      LOG("ota: connesso con successo a '%s'", config.networks[i].ssid);
+      break;
     }
   }
 
-  // 2. Se la scansione non ha trovato corrispondenze, prova a cascata tutte le reti note
+  // 2. Se la connessione diretta non riesce, esegui una scansione dell'etere a 2.4 GHz
   if (!connected) {
-    for (int i = 0; i < config.networkCount && !connected; ++i) {
-      view.network = config.networks[i].ssid;
-      char stateMsg[64];
-      snprintf(stateMsg, sizeof(stateMsg), "Tentativo %d/%d (%s)...", i + 1, config.networkCount, config.networks[i].ssid);
-      view.state = stateMsg;
-      hooks.show(view, hooks.user);
+    view.network = "Scansione...";
+    view.state = "Ricerca reti 2.4 GHz...";
+    hooks.show(view, hooks.user);
+    WiFi.disconnect(true);
+    delay(100);
 
-      LOG("ota: tentativo rete %d: '%s'", i + 1, config.networks[i].ssid);
-      WiFi.disconnect();
-      delay(150);
-      WiFi.begin(config.networks[i].ssid, config.networks[i].password);
-      const unsigned long start = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
-        if (hooks.backPressed(hooks.user)) leave();
-        delay(100);
-      }
-      if (WiFi.status() == WL_CONNECTED) {
-        connected = true;
-        config.activeIdx = i;
-        break;
+    const int nFound = WiFi.scanNetworks(false, false, false, 300);
+    LOG("ota: scansione etere: trovate %d reti", nFound);
+
+    for (int s = 0; s < nFound && !connected; ++s) {
+      const String scannedSsid = WiFi.SSID(s);
+      for (int i = 0; i < config.networkCount; ++i) {
+        if (scannedSsid == config.networks[i].ssid) {
+          LOG("ota: trovata rete nota '%s' (RSSI %d)", config.networks[i].ssid, WiFi.RSSI(s));
+          view.network = config.networks[i].ssid;
+          char stateMsg[64];
+          snprintf(stateMsg, sizeof(stateMsg), "Connessione a %s...", config.networks[i].ssid);
+          view.state = stateMsg;
+          hooks.show(view, hooks.user);
+
+          WiFi.scanDelete();
+          WiFi.begin(config.networks[i].ssid, config.networks[i].password);
+          const unsigned long start = millis();
+          while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+            if (hooks.backPressed(hooks.user)) leave();
+            delay(100);
+          }
+          if (WiFi.status() == WL_CONNECTED) {
+            connected = true;
+            config.activeIdx = i;
+            break;
+          }
+        }
       }
     }
+    WiFi.scanDelete();
   }
 
   if (!connected) {
