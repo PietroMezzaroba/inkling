@@ -5,10 +5,13 @@
 #include "inkling/DeviceStatus.h"
 #include "inkling/Platform.h"
 #include "inkling/Screens.h"
+#include "inkling/desk/DeskDashboard.h"
 #include "inkling/game/BreachGame.h"
+#include "inkling/oracle/OracleDeck.h"
 #include "inkling/pet/PetEngine.h"
 #include "inkling/reader/BookReader.h"
 #include "inkling/reader/Library.h"
+#include "inkling/rpg/TextRpgEngine.h"
 
 namespace inkling {
 
@@ -22,6 +25,9 @@ class InklingApp {
   enum class Mode : uint8_t {
     Home,
     Library,
+    DeskAmbient,
+    Oracle,
+    TextRpg,
     PetSanctuary,
     BreachGame,
     Reader,
@@ -53,6 +59,9 @@ class InklingApp {
   void begin();
   void showHome();
   void showLibrary();
+  void showDeskAmbient();
+  void showOracle();
+  void showTextRpg();
   void showPetSanctuary();
   void showBreachGame();
   void onButton(Button button);
@@ -73,6 +82,12 @@ class InklingApp {
 
   const PetEngine& pet() const { return pet_; }
   PetEngine& pet() { return pet_; }
+  const DeskDashboard& desk() const { return desk_; }
+  DeskDashboard& desk() { return desk_; }
+  const OracleDeck& oracle() const { return oracle_; }
+  OracleDeck& oracle() { return oracle_; }
+  const TextRpgEngine& rpg() const { return rpg_; }
+  TextRpgEngine& rpg() { return rpg_; }
   const Library& library() const { return library_; }
   const DeviceStatus& status() const { return status_; }
   const BookReader* reader() const { return reader_; }
@@ -82,6 +97,9 @@ class InklingApp {
   // Screen functions read the app through the `user` pointer.
   static void homeScreen(UiApp::ScreenType& screen, void* user);
   static void libraryScreen(UiApp::ScreenType& screen, void* user);
+  static void deskAmbientScreen(UiApp::ScreenType& screen, void* user);
+  static void oracleScreen(UiApp::ScreenType& screen, void* user);
+  static void textRpgScreen(UiApp::ScreenType& screen, void* user);
   static void petSanctuaryScreen(UiApp::ScreenType& screen, void* user);
   static void breachGameScreen(UiApp::ScreenType& screen, void* user);
   static void readerScreen(UiApp::ScreenType& screen, void* user);
@@ -130,6 +148,9 @@ class InklingApp {
   Library library_;
   PetEngine pet_;
   BreachGame breach_;
+  DeskDashboard desk_;
+  OracleDeck oracle_;
+  TextRpgEngine rpg_;
   Menu homeDock_, libraryMenu_, sanctuaryMenu_, readerMenu_, tocMenu_;
   char lastBookPath_[128] = {};
   char message_[96] = {};

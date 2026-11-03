@@ -22,10 +22,26 @@
 //                            written to the reader's slot, then restarts into it
 namespace ota {
 
-struct Config {
+struct WifiCred {
   char ssid[64] = {};
   char password[96] = {};
+};
+
+struct Config {
+  static constexpr int kMaxNetworks = 8;
+  WifiCred networks[kMaxNetworks] = {};
+  int networkCount = 0;
   char token[64] = {};
+
+  const char* activeSsid() const {
+    if (activeIdx >= 0 && activeIdx < networkCount) return networks[activeIdx].ssid;
+    return (networkCount > 0) ? networks[0].ssid : "";
+  }
+  const char* activePassword() const {
+    if (activeIdx >= 0 && activeIdx < networkCount) return networks[activeIdx].password;
+    return (networkCount > 0) ? networks[0].password : "";
+  }
+  mutable int activeIdx = 0;
 };
 
 constexpr const char* kConfigPath = "/.inkling/wifi.txt";

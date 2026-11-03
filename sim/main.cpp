@@ -199,7 +199,34 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
   // 6. Close book back to Home (now showing updated progress & Pet stats!)
   step("back-to-home", B::Back);
 
-  // 7. Open Interactive Pet Sanctuary & play Hacker Matrix: Breach!
+  // 7. Test Desk Ambient Mode (Split-Flap Clock, Weather, Mini-Calendar, GitHub Heatmap & Moon Phase)
+  rec.label = "desk-dashboard-heatmap";
+  app.showDeskAmbient();
+  app.update();
+
+  step("desk-dashboard-moon", B::Right);
+  step("desk-back-home", B::Back);
+
+  // 8. Test L'Oracolo & Oblique Strategies (Daily Stoic & Brian Eno)
+  rec.label = "oracle-daily-stoic";
+  app.showOracle();
+  app.update();
+
+  step("oracle-oblique-strategies", B::Right);
+  app.oracle().onShake();
+  rec.label = "oracle-imu-shake";
+  app.update();
+  step("oracle-back-home", B::Back);
+
+  // 9. Test Micro-RPG La Cripta dei Tomi (Procedural text crawler & combat)
+  rec.label = "rpg-crypt-room";
+  app.showTextRpg();
+  app.update();
+
+  step("rpg-combat-action", B::Confirm);
+  step("rpg-back-home", B::Back);
+
+  // 10. Open Interactive Pet Sanctuary & play Hacker Matrix: Breach!
   step("home-dock-sanctuary", B::Down);
   step("pet-sanctuary", B::Confirm);
   step("pet-feed-crystal", B::Confirm);  // Feed 1 Ink Crystal!

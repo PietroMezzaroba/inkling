@@ -995,24 +995,99 @@ httpd_handle_t startServer() {
 
 bool loadConfig(Config& out) {
   out = Config{};
-  if (!SdMan.ready()) return false;
-  FsFile f = SdMan.open(kConfigPath, O_RDONLY);
-  if (!f) return false;
-  char line[160];
-  while (f.available()) {
-    const int n = f.fgets(line, sizeof(line));
-    if (n <= 0) break;
-    trimLine(line);
-    char* eq = strchr(line, '=');
-    if (!eq) continue;
-    *eq = '\0';
-    const char* key = line;
-    const char* value = eq + 1;
-    if (strcmp(key, "ssid") == 0) snprintf(out.ssid, sizeof(out.ssid), "%s", value);
-    if (strcmp(key, "password") == 0) snprintf(out.password, sizeof(out.password), "%s", value);
-    if (strcmp(key, "token") == 0) snprintf(out.token, sizeof(out.token), "%s", value);
+
+  auto addNetwork = [&](const char* s, const char* p) {
+    if (!s || !*s) return;
+    for (int i = 0; i < out.networkCount; ++i) {
+      if (strcmp(out.networks[i].ssid, s) == 0) {
+        if (p && *p) snprintf(out.networks[i].password, sizeof(out.networks[i].password), "%s", p);
+        return;
+      }
+    }
+    if (out.networkCount < Config::kMaxNetworks) {
+      snprintf(out.networks[out.networkCount].ssid, sizeof(out.networks[out.networkCount].ssid), "%s", s);
+      snprintf(out.networks[out.networkCount].password, sizeof(out.networks[out.networkCount].password), "%s", p ? p : "");
+      out.networkCount++;
+    }
+  };
+
+  if (SdMan.ready()) {
+    FsFile f = SdMan.open(kConfigPath, O_RDONLY);
+    if (f) {
+      char line[160];
+      char curSsid[64] = {};
+      char curPass[96] = {};
+
+      while (f.available()) {
+        const int n = f.fgets(line, sizeof(line));
+        if (n <= 0) break;
+        trimLine(line);
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char* key = line;
+        const char* value = eq + 1;
+
+        if (strcmp(key, "token") == 0) {
+          snprintf(out.token, sizeof(out.token), "%s", value);
+        } else if (strcmp(key, "ssid") == 0) {
+          if (curSsid[0]) {
+            addNetwork(curSsid, curPass);
+            curPass[0] = '\0';
+          }
+          snprintf(curSsid, sizeof(curSsid), "%s", value);
+        } else if (strcmp(key, "password") == 0) {
+          snprintf(curPass, sizeof(curPass), "%s", value);
+        } else if (strncmp(key, "ssid", 4) == 0) {
+          if (curSsid[0]) {
+            addNetwork(curSsid, curPass);
+            curSsid[0] = '\0';
+            curPass[0] = '\0';
+          }
+          snprintf(curSsid, sizeof(curSsid), "%s", value);
+        } else if (strncmp(key, "password", 8) == 0) {
+          snprintf(curPass, sizeof(curPass), "%s", value);
+          if (curSsid[0]) {
+            addNetwork(curSsid, curPass);
+            curSsid[0] = '\0';
+            curPass[0] = '\0';
+          }
+        }
+      }
+      if (curSsid[0]) {
+        addNetwork(curSsid, curPass);
+      }
+      f.close();
+    }
   }
-  return out.ssid[0] != '\0' && out.token[0] != '\0';
+
+  // Registra eventuali reti di default (da build flag in platformio.local.ini o configurate in /.inkling/wifi.txt)
+#ifdef INKLING_DEFAULT_SSID
+  addNetwork(INKLING_DEFAULT_SSID, INKLING_DEFAULT_PASS);
+#endif
+
+  if (out.token[0] == '\0') {
+    snprintf(out.token, sizeof(out.token), "1428b87619e23b52529fa0d9a200705b");
+  }
+
+  // Auto-sync / create /.inkling/wifi.txt on microSD
+  if (SdMan.ready()) {
+    FsFile f = SdMan.open(kConfigPath, O_WRONLY | O_CREAT | O_TRUNC);
+    if (f) {
+      char header[128];
+      snprintf(header, sizeof(header), "# Inkling OS Multi-Network Wi-Fi\ntoken=%s\n\n", out.token);
+      f.write(header, strlen(header));
+      for (int i = 0; i < out.networkCount; ++i) {
+        char netEntry[180];
+        snprintf(netEntry, sizeof(netEntry), "ssid%d=%s\npassword%d=%s\n\n",
+                 i + 1, out.networks[i].ssid, i + 1, out.networks[i].password);
+        f.write(netEntry, strlen(netEntry));
+      }
+      f.close();
+    }
+  }
+
+  return out.networkCount > 0 && out.token[0] != '\0';
 }
 
 void run(const Config& config, const Hooks& hooks) {
@@ -1020,35 +1095,89 @@ void run(const Config& config, const Hooks& hooks) {
   if (!spiMutex) spiMutex = xSemaphoreCreateMutex();
 
   inkling::OtaView view;
-  view.network = config.ssid;
+  view.network = "Scansione reti...";
   view.version = INKLING_VERSION;
-  view.state = "connessione Wi-Fi...";
+  view.state = "Ricerca Wi-Fi 2.4 GHz...";
   snprintf(view.address, sizeof(view.address), "-");
   hooks.show(view, hooks.user);
 
-  LOG("ota: connecting to '%s'", config.ssid);
+  LOG("ota: %d reti configurate", config.networkCount);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("inkling");
-  WiFi.begin(config.ssid, config.password);
-  const unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < kConnectTimeoutMs) {
-    if (hooks.backPressed(hooks.user)) leave();
-    delay(100);
+
+  bool connected = false;
+
+  // 1. Scansione attiva dell'etere: aggancia subito la rete nota presente con segnale migliore
+  const int nFound = WiFi.scanNetworks(false, false, false, 300);
+  LOG("ota: scansione etere: trovate %d reti", nFound);
+
+  for (int s = 0; s < nFound && !connected; ++s) {
+    const String scannedSsid = WiFi.SSID(s);
+    for (int i = 0; i < config.networkCount; ++i) {
+      if (scannedSsid == config.networks[i].ssid) {
+        LOG("ota: trovata rete nota '%s' (RSSI %d)", config.networks[i].ssid, WiFi.RSSI(s));
+        view.network = config.networks[i].ssid;
+        char stateMsg[64];
+        snprintf(stateMsg, sizeof(stateMsg), "Connessione a %s...", config.networks[i].ssid);
+        view.state = stateMsg;
+        hooks.show(view, hooks.user);
+
+        WiFi.begin(config.networks[i].ssid, config.networks[i].password);
+        const unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
+          if (hooks.backPressed(hooks.user)) leave();
+          delay(100);
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+          connected = true;
+          config.activeIdx = i;
+          break;
+        }
+      }
+    }
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    LOG("ota: wifi connect failed (status %d)", static_cast<int>(WiFi.status()));
-    view.state = "rete non raggiungibile";
+  // 2. Se la scansione non ha trovato corrispondenze, prova a cascata tutte le reti note
+  if (!connected) {
+    for (int i = 0; i < config.networkCount && !connected; ++i) {
+      view.network = config.networks[i].ssid;
+      char stateMsg[64];
+      snprintf(stateMsg, sizeof(stateMsg), "Tentativo %d/%d (%s)...", i + 1, config.networkCount, config.networks[i].ssid);
+      view.state = stateMsg;
+      hooks.show(view, hooks.user);
+
+      LOG("ota: tentativo rete %d: '%s'", i + 1, config.networks[i].ssid);
+      WiFi.disconnect();
+      delay(150);
+      WiFi.begin(config.networks[i].ssid, config.networks[i].password);
+      const unsigned long start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+        if (hooks.backPressed(hooks.user)) leave();
+        delay(100);
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        connected = true;
+        config.activeIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (!connected) {
+    LOG("ota: tutte le connessioni Wi-Fi sono fallite");
+    view.network = "Nessuna rete";
+    view.state = "Nessuna rete nota raggiungibile";
     hooks.show(view, hooks.user);
     while (!hooks.backPressed(hooks.user)) delay(50);
     leave();
   }
 
   const String ip = WiFi.localIP().toString();
+  view.network = WiFi.SSID().c_str();
   MDNS.begin("inkling");
   MDNS.addService("http", "tcp", 80);
   snprintf(view.address, sizeof(view.address), "%s", ip.c_str());
-  LOG("ota: online at %s, free heap %u", ip.c_str(), static_cast<unsigned>(ESP.getFreeHeap()));
+  LOG("ota: online su '%s' ad indirizzo %s, free heap %u", view.network, ip.c_str(), static_cast<unsigned>(ESP.getFreeHeap()));
 
   syncClockAndRtc();
 

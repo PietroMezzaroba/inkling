@@ -92,9 +92,11 @@ enum ReaderMenuItem : int {
 enum HomeDockItem : int {
   kDockRead = 0,
   kDockLibrary = 1,
-  kDockSanctuary = 2,
-  kDockSystem = 3,
-  kDockCount = 4,
+  kDockDesk = 2,
+  kDockOracle = 3,
+  kDockRpg = 4,
+  kDockSystem = 5,
+  kDockCount = 6,
 };
 
 enum SanctuaryAction : int {
@@ -204,6 +206,24 @@ void InklingApp::showLibrary() {
   cursorOnlyRedraw_ = false;
   mode_ = Mode::Library;
   ui_.setScreen(libraryScreen, this, RefreshHint::Fast);
+}
+
+void InklingApp::showDeskAmbient() {
+  cursorOnlyRedraw_ = false;
+  mode_ = Mode::DeskAmbient;
+  ui_.setScreen(deskAmbientScreen, this, RefreshHint::Full);
+}
+
+void InklingApp::showOracle() {
+  cursorOnlyRedraw_ = false;
+  mode_ = Mode::Oracle;
+  ui_.setScreen(oracleScreen, this, RefreshHint::Fast);
+}
+
+void InklingApp::showTextRpg() {
+  cursorOnlyRedraw_ = false;
+  mode_ = Mode::TextRpg;
+  ui_.setScreen(textRpgScreen, this, RefreshHint::Fast);
 }
 
 void InklingApp::showPetSanctuary() {
@@ -539,11 +559,13 @@ void InklingApp::runMenuItem(int item) {
 
 void InklingApp::runHomeDockItem(int item) {
   switch (item) {
-    case kDockRead:      openActiveOrFirstBook(); break;
-    case kDockLibrary:   showLibrary(); break;
-    case kDockSanctuary: showPetSanctuary(); break;
-    case kDockSystem:    showDiagnostic(); break;
-    default:             break;
+    case kDockRead:    openActiveOrFirstBook(); break;
+    case kDockLibrary: showLibrary(); break;
+    case kDockDesk:    showDeskAmbient(); break;
+    case kDockOracle:  showOracle(); break;
+    case kDockRpg:     showTextRpg(); break;
+    case kDockSystem:  showDiagnostic(); break;
+    default:           break;
   }
 }
 
@@ -583,7 +605,11 @@ void InklingApp::onImuSample(float ax, float ay, float az) {
   const float deltaSq = dx * dx + dy * dy + dz * dz;
   if (deltaSq > 0.65f && imuCooldown_ == 0) {
     imuCooldown_ = 8;
-    if (mode_ == Mode::Home || mode_ == Mode::PetSanctuary) {
+    if (mode_ == Mode::Oracle) {
+      oracle_.onShake();
+      cursorOnlyRedraw_ = false;
+      ui_.invalidate(RefreshHint::Fast);
+    } else if (mode_ == Mode::Home || mode_ == Mode::PetSanctuary) {
       pet_.interact(storage_, true);
       cursorOnlyRedraw_ = false;
       ui_.invalidate(RefreshHint::Fast);
@@ -600,14 +626,76 @@ void InklingApp::onButton(Button button) {
   const bool down = button == Button::Down || button == Button::Right;
   switch (mode_) {
     case Mode::Home:
-      if (up || down) {
-        homeDock_.move(up ? -1 : 1);
+      if (button == Button::Up) {
+        homeDock_.move(-2);
+        cursorOnlyRedraw_ = true;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Down) {
+        homeDock_.move(2);
+        cursorOnlyRedraw_ = true;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Left) {
+        homeDock_.move(-1);
+        cursorOnlyRedraw_ = true;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Right) {
+        homeDock_.move(1);
         cursorOnlyRedraw_ = true;
         ui_.invalidate(RefreshHint::Fast);
       } else if (button == Button::Confirm) {
         runHomeDockItem(homeDock_.selected);
       } else if (button == Button::Back) {
         showLibrary();
+      }
+      break;
+
+    case Mode::DeskAmbient:
+      if (button == Button::Right || button == Button::Left) {
+        desk_.cycleSubWidget();
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Confirm) {
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Full);
+      } else if (button == Button::Back) {
+        showHome();
+      }
+      break;
+
+    case Mode::Oracle:
+      if (button == Button::Right || button == Button::Left) {
+        oracle_.toggleDeck();
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Confirm || button == Button::Down) {
+        oracle_.nextCard();
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Up) {
+        oracle_.prevCard();
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Back) {
+        showHome();
+      }
+      break;
+
+    case Mode::TextRpg:
+      if (button == Button::Up) {
+        rpg_.moveCursor(-1);
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Down) {
+        rpg_.moveCursor(1);
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Confirm) {
+        rpg_.confirmChoice();
+        rpg_.save(storage_);
+        cursorOnlyRedraw_ = false;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Back) {
+        showHome();
       }
       break;
 
@@ -747,139 +835,138 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
   const int activeIdx = self.activeBookIndex();
 
   if (self.cursorOnlyRedraw_) {
-    clearBandY(458, 746);
+    clearBandY(350, 726);
   } else {
     clearScreen();
-    const LocalTime now = self.currentLocalTime();
-
     drawTopHud(t, self.status_, self.pet_, "HOME");
 
-    // 1. Hero Pet Habitat & Telemetry Card (y=48..304)
-    const Rect petCard{14, 48, static_cast<int16_t>(w - 28), 254};
-    drawCard(t, petCard, 10, 4, false, true);
+    // 1. Desk Ambient & Weather Preview Card (y=44..208)
+    const Rect previewCard{14, 44, static_cast<int16_t>(w - 28), 164};
+    drawCard(t, previewCard, 10, 4, false, true);
 
-    // Left: Interactive Habitat Window
-    const Rect habRect{26, 60, 212, 182};
-    drawHabitatScene(t, habRect, self.pet_, self.status_, false);
+    const int hour = self.status_.clockValid ? self.status_.hour : 18;
+    const int minute = self.status_.clockValid ? self.status_.minute : 25;
+    char hStr[4], mStr[4];
+    snprintf(hStr, sizeof(hStr), "%02d", hour);
+    snprintf(mStr, sizeof(mStr), "%02d", minute);
 
-    // Right: Pet Status & Gauges
-    const int16_t rx = 250;
+    // Left: Split-Flap Clock Mini (x=26..220)
+    const int16_t flapW = 42;
+    const int16_t flapH = 68;
+    const int16_t flapY = 56;
+    DeskDashboard::drawSplitFlapCard(t, 26, flapY, flapW, flapH, hStr[0]);
+    DeskDashboard::drawSplitFlapCard(t, 72, flapY, flapW, flapH, hStr[1]);
+
+    // Colon dots
+    fillCircle(t, 120, flapY + 22, 3, Color::Black);
+    fillCircle(t, 120, flapY + 46, 3, Color::Black);
+
+    DeskDashboard::drawSplitFlapCard(t, 128, flapY, flapW, flapH, mStr[0]);
+    DeskDashboard::drawSplitFlapCard(t, 174, flapY, flapW, flapH, mStr[1]);
+
+    drawText(t, Rect{26, 134, 190, 20}, "MARTEDÌ 3 NOVEMBRE", ui::kFontMicro, Color::Black);
+    drawPill(t, 26, 160, 22, "DESK STAND · TASTO [3]", ui::kFontMicro, true, 8);
+
+    // Right: Weather & Reading Telemetry (rx=236)
+    const int16_t rx = 236;
     const int16_t rw = static_cast<int16_t>(w - rx - 26);
 
-    char stageBadge[48];
-    snprintf(stageBadge, sizeof(stageBadge), "LV.%u · %s", static_cast<unsigned>(self.pet_.state().level),
-             self.pet_.stageName());
-    drawPill(t, rx, 60, 24, stageBadge, kFontMicro, true, 10);
+    DeskDashboard::drawWeatherIcon(t, rx, 56, WeatherCondition::Sunny, 36);
+    drawText(t, Rect{static_cast<int16_t>(rx + 44), 58, static_cast<int16_t>(rw - 44), 22}, "18°C · Sereno",
+             ui::kFontBody, Color::Black);
+    drawText(t, Rect{static_cast<int16_t>(rx + 44), 80, static_cast<int16_t>(rw - 44), 16}, "Milano · Wi-Fi Off",
+             ui::kFontMicro, Color::Black);
 
-    char moodLine[56];
-    snprintf(moodLine, sizeof(moodLine), "%s · %s", self.pet_.moodLabel(now), self.pet_.archetypeName());
-    drawText(t, Rect{rx, 88, rw, 22}, moodLine, kFontSmall, Color::Black);
-
-    // Gauge 1: Inchiostro (Satiety)
-    char g1[32];
-    snprintf(g1, sizeof(g1), "Inchiostro %u%%", static_cast<unsigned>(self.pet_.state().satiety));
-    drawText(t, Rect{rx, 114, rw, 18}, g1, kFontMicro, Color::Black);
-    drawSegmentedBar(t, Rect{rx, 134, rw, 14}, self.pet_.state().satiety, 10, false);
-
-    // Gauge 2: Risonanza (Mood)
-    char g2[32];
-    snprintf(g2, sizeof(g2), "Risonanza %u%%", static_cast<unsigned>(self.pet_.state().mood));
-    drawText(t, Rect{rx, 152, rw, 18}, g2, kFontMicro, Color::Black);
-    drawSegmentedBar(t, Rect{rx, 172, rw, 14}, self.pet_.state().mood, 10, false);
-
-    // Gauge 3: Daily Reading Goal
+    // Reading Streak
     char g3[48];
-    snprintf(g3, sizeof(g3), "Oggi: %u/%u pag (%lu tot)", static_cast<unsigned>(self.pet_.state().dailyPages),
-             static_cast<unsigned>(self.pet_.state().dailyGoal),
-             static_cast<unsigned long>(self.pet_.state().totalPagesRead));
-    drawText(t, Rect{rx, 190, rw, 18}, g3, kFontMicro, Color::Black);
-    drawProgressBar(t, Rect{rx, 210, rw, 14}, self.pet_.dailyGoalPct(), false);
+    snprintf(g3, sizeof(g3), "Streak 7gg · %u/%u pag", static_cast<unsigned>(self.pet_.state().dailyPages),
+             static_cast<unsigned>(self.pet_.state().dailyGoal));
+    drawText(t, Rect{rx, 114, rw, 18}, g3, ui::kFontMicro, Color::Black);
+    drawProgressBar(t, Rect{rx, 136, rw, 14}, self.pet_.dailyGoalPct(), false);
 
-    // Bottom Speech Bubble Strip inside Hero Card (crisp white card + black badge for 100% legibility)
-    const Rect bubble{26, 250, static_cast<int16_t>(w - 52), 42};
-    fastFill(t, bubble, Paint::solid(Color::White), 6);
-    fastStroke(t, bubble, Paint::solid(Color::Black), 2, 6);
-    fastFill(t, Rect{26, 250, 32, 42}, Paint::solid(Color::Black), 6);
-    drawIcon16(t, 34, 263, Icon::Spark, Color::White);
-    drawText(t, Rect{68, 254, static_cast<int16_t>(w - 104), 34}, self.pet_.currentDialogue(now), kFontSmall,
-             Color::Black);
+    drawPill(t, rx, 160, 22, "AMOR FATI // STOIC", ui::kFontMicro, false, 8);
 
-    // 2. "In Lettura Ora" Featured Book Card (y=314..450)
-    const Rect bookCard{14, 314, static_cast<int16_t>(w - 28), 134};
-    drawCard(t, bookCard, 10, 4, false, false);
+    // 2. "In Lettura Ora" Featured Book Card (y=216..344)
+    const Rect bookCard{14, 216, static_cast<int16_t>(w - 28), 128};
+    drawCard(t, bookCard, 10, 3, false, false);
 
     if (activeIdx >= 0 && activeIdx < self.library_.count()) {
       const auto& b = self.library_.at(activeIdx);
-      drawBookCover(t, 28, 330, b.name, b.author, nullptr);
+      drawBookCover(t, 28, 228, b.name, b.author, nullptr);
 
       const int16_t bx = 108;
       const int16_t bw = static_cast<int16_t>(w - bx - 28);
-      drawPill(t, bx, 328, 22, b.started ? "IN LETTURA ORA" : "PROSSIMA LETTURA", kFontMicro, true, 10);
+      drawPill(t, bx, 228, 22, b.started ? "IN LETTURA ORA" : "PROSSIMA LETTURA", ui::kFontMicro, true, 10);
 
       char pctBadge[16];
       snprintf(pctBadge, sizeof(pctBadge), "%u%%", static_cast<unsigned>(b.progressPct));
-      drawText(t, Rect{static_cast<int16_t>(bx + bw - 60), 328, 60, 22}, pctBadge, kFontBody, Color::Black,
+      drawText(t, Rect{static_cast<int16_t>(bx + bw - 60), 228, 60, 22}, pctBadge, ui::kFontBody, Color::Black,
                TextAlign::Right, false);
 
-      drawText(t, Rect{bx, 356, bw, 28}, b.name, kFontTitle, Color::Black);
-      drawText(t, Rect{bx, 384, bw, 22}, b.author, kFontSmall, Color::Black);
-      drawProgressBar(t, Rect{bx, 414, bw, 16}, b.progressPct, false);
+      drawText(t, Rect{bx, 256, bw, 26}, b.name, ui::kFontTitle, Color::Black);
+      drawText(t, Rect{bx, 284, bw, 20}, b.author, ui::kFontSmall, Color::Black);
+      drawProgressBar(t, Rect{bx, 312, bw, 14}, b.progressPct, false);
     } else {
-      drawIcon16(t, 34, 368, Icon::Book, Color::Black);
-      drawText(t, Rect{62, 352, static_cast<int16_t>(w - 90), 28}, "Nessun libro sulla scheda SD", kFontTitle,
+      drawIcon16(t, 34, 268, Icon::Book, Color::Black);
+      drawText(t, Rect{62, 252, static_cast<int16_t>(w - 90), 28}, "Nessun libro sulla scheda SD", ui::kFontTitle,
                Color::Black);
-      drawText(t, Rect{62, 384, static_cast<int16_t>(w - 90), 24},
-               "Copia i tuoi file .epub o .txt sulla microSD.", kFontSmall, Color::Black);
+      drawText(t, Rect{62, 284, static_cast<int16_t>(w - 90), 24},
+               "Copia i tuoi file .epub o .txt sulla microSD.", ui::kFontSmall, Color::Black);
     }
   }
 
-  // 3. Interactive 2x2 Cyber-Dock Grid (y=462..740)
+  // 3. Interactive 3x2 Cyber-Bento Dock Grid (y=354..718)
   static const char* const kDockTitles[kDockCount] = {
       "CONTINUA LETTURA",
       "LIBRERIA VOLUMI",
-      "SANTUARIO PET",
+      "DESK STAND & METEO",
+      "ORACOLO FILOSOFIA",
+      "CRIPTA DEI TOMI",
       "SISTEMA & WI-FI",
   };
   static const Icon kDockIcons[kDockCount] = {
       Icon::Book,
       Icon::Compass,
-      Icon::Crystal,
+      Icon::Moon,
+      Icon::Spark,
+      Icon::Flame,
       Icon::Sliders,
   };
 
-  char sub0[40], sub1[40], sub2[40], sub3[40];
+  char sub0[40], sub1[40], sub2[40], sub3[40], sub4[40], sub5[40];
   snprintf(sub0, sizeof(sub0), activeIdx >= 0 ? "Riprendi da %u%%" : "Apri catalogo",
            activeIdx >= 0 ? static_cast<unsigned>(self.library_.at(activeIdx).progressPct) : 0u);
   snprintf(sub1, sizeof(sub1), "%d %s su SD", self.library_.count(),
            self.library_.count() == 1 ? "libro" : "libri");
-  snprintf(sub2, sizeof(sub2), "%u Cristalli · %s", static_cast<unsigned>(self.pet_.state().inkCrystals),
-           self.pet_.stageName());
-  snprintf(sub3, sizeof(sub3), "Sensori · Aggiorna OTA");
-  const char* const subs[kDockCount] = {sub0, sub1, sub2, sub3};
+  snprintf(sub2, sizeof(sub2), "Split-Flap · 18°C Meteo");
+  snprintf(sub3, sizeof(sub3), "Daily Stoic & Brian Eno");
+  snprintf(sub4, sizeof(sub4), "Rogue RPG · Piano %d", self.rpg_.depth());
+  snprintf(sub5, sizeof(sub5), "Giornale ANSA & OTA");
+  const char* const subs[kDockCount] = {sub0, sub1, sub2, sub3, sub4, sub5};
 
   const int16_t tileW = static_cast<int16_t>((w - 40) / 2);
-  const int16_t tileH = 128;
+  const int16_t tileH = 110;
 
   for (int i = 0; i < kDockCount; ++i) {
     const int col = i & 1;
     const int row = i >> 1;
     const int16_t tx = static_cast<int16_t>(14 + col * (tileW + 12));
-    const int16_t ty = static_cast<int16_t>(462 + row * (tileH + 14));
+    const int16_t ty = static_cast<int16_t>(354 + row * (tileH + 10));
     const bool sel = (self.homeDock_.selected == i);
     const Rect tr{tx, ty, tileW, tileH};
 
-    drawCard(t, tr, 10, sel ? 5 : 3, sel, sel);
+    drawCard(t, tr, 8, sel ? 4 : 2, sel, sel);
     const Color fg = sel ? Color::White : Color::Black;
 
-    drawIcon16(t, static_cast<int16_t>(tx + 16), static_cast<int16_t>(ty + 18), kDockIcons[i], fg);
+    drawIcon16(t, static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 14), kDockIcons[i], fg);
     if (sel) {
-      drawPill(t, static_cast<int16_t>(tx + tileW - 68), static_cast<int16_t>(ty + 14), 22, "ATTIVO", kFontMicro,
-               false, 8);
+      drawPill(t, static_cast<int16_t>(tx + tileW - 68), static_cast<int16_t>(ty + 12), 20, "ATTIVO",
+               ui::kFontMicro, false, 6);
     }
-    drawText(t, Rect{static_cast<int16_t>(tx + 16), static_cast<int16_t>(ty + 48), static_cast<int16_t>(tileW - 32), 28},
-             kDockTitles[i], kFontBody, fg);
-    drawText(t, Rect{static_cast<int16_t>(tx + 16), static_cast<int16_t>(ty + 80), static_cast<int16_t>(tileW - 32), 24},
-             subs[i], kFontSmall, fg);
+    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 42), static_cast<int16_t>(tileW - 28), 24},
+             kDockTitles[i], ui::kFontBody, fg);
+    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 72), static_cast<int16_t>(tileW - 28), 22},
+             subs[i], ui::kFontSmall, fg);
   }
 
   if (!self.cursorOnlyRedraw_) {
@@ -1550,6 +1637,25 @@ void InklingApp::tocScreen(UiApp::ScreenType& screen, void* user) {
     drawBottomKeyBar(t, "SU/GIU", "Capitolo", "OK", "Vai a capitolo", "BACK", "Menu");
   }
   self.cursorOnlyRedraw_ = false;
+}
+
+void InklingApp::deskAmbientScreen(UiApp::ScreenType& screen, void* user) {
+  auto& self = *static_cast<InklingApp*>(user);
+  auto& t = screen.target();
+  self.desk_.render(t, self.status_, 7, self.pet_.state().dailyPages, self.pet_.state().dailyGoal,
+                    self.pet_.state().totalPagesRead);
+}
+
+void InklingApp::oracleScreen(UiApp::ScreenType& screen, void* user) {
+  auto& self = *static_cast<InklingApp*>(user);
+  auto& t = screen.target();
+  self.oracle_.render(t, self.status_);
+}
+
+void InklingApp::textRpgScreen(UiApp::ScreenType& screen, void* user) {
+  auto& self = *static_cast<InklingApp*>(user);
+  auto& t = screen.target();
+  self.rpg_.render(t, self.status_);
 }
 
 }  // namespace inkling

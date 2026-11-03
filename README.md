@@ -1,31 +1,31 @@
-# INKLING OS v2.0 — Cyber-Editorial E-Ink Firmware per Xteink X3
+# INKLING OS v2.1 — Cyber-Editorial E-Ink Firmware per Xteink X3
 
 <p align="center">
-  <img src="docs/screenshots/01-home-command-center.png" width="250" alt="Home Command Center" />
-  <img src="docs/screenshots/04-reader-bionic-focus.png" width="250" alt="Bionic Focus Reader" />
-  <img src="docs/screenshots/07-pet-sanctuary-archon.png" width="250" alt="Kuro-Ink Sanctuary" />
+  <img src="docs/screenshots/20-desk-splitflap.png" width="250" alt="Cyber-Desk Split-Flap Clock" />
+  <img src="docs/screenshots/22-oracle-stoic.png" width="250" alt="L'Oracolo Daily Stoic" />
+  <img src="docs/screenshots/24-rpg-crypt.png" width="250" alt="La Cripta dei Tomi RPG" />
 </p>
 
-**Inkling OS v2.0** è un sistema operativo E-Ink completo, ultra-ottimizzato e dal design *Cyber-Editorial / Teenage Engineering*, progettato su misura per l'e-reader **Xteink X3** (`ESP32-C3` RISC-V 160 MHz single-core senza PSRAM, pannello E-Ink `UC8253` 792×528 1-bit, giroscopio IMU a 3 assi, RTC `PCF8563` e microSD).
+**Inkling OS v2.1** è un sistema operativo E-Ink completo, ultra-ottimizzato e dal design *Cyber-Editorial / Teenage Engineering / Braun*, progettato su misura per l'e-reader tascabile **Xteink X3** (`ESP32-C3` RISC-V 160 MHz single-core senza PSRAM, pannello E-Ink `UC8253` 792×528 1-bit, giroscopio IMU a 3 assi, RTC `PCF8563` e microSD).
 
 ---
 
 ## Galleria Schermate (Rendering 1:1 da Framebuffer 528×792)
 
-### Command Center, Libreria Bento & Studio Tipografico
-| Home Command Center | Libreria Bento | Controllo Lettura (Maxi-Card) |
+### Cyber-Desk Stand, Meteo & Home Command Center
+| Desk Stand (Orologio Split-Flap + GitHub) | Desk Stand (Fase Lunare Astronomica) | Home Command Center Rinnovata |
 | :---: | :---: | :---: |
-| <img src="docs/screenshots/01-home-command-center.png" width="240" /> | <img src="docs/screenshots/02-library-bento.png" width="240" /> | <img src="docs/screenshots/06-reader-control-studio.png" width="240" /> |
+| <img src="docs/screenshots/20-desk-splitflap.png" width="240" /> | <img src="docs/screenshots/21-desk-moon.png" width="240" /> | <img src="docs/screenshots/25-home-v21.png" width="240" /> |
+
+### L'Oracolo Filosofico, Oblique Strategies & Micro-RPG
+| Daily Stoic (Marco Aurelio / Seneca) | Oblique Strategies (Brian Eno) | La Cripta dei Tomi (Micro-RPG) |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/22-oracle-stoic.png" width="240" /> | <img src="docs/screenshots/23-oracle-oblique.png" width="240" /> | <img src="docs/screenshots/24-rpg-crypt.png" width="240" /> |
 
 ### Motore di Lettura Editoriale, Bionic Focus & Modalità Notte
 | Prosa Editoriale (Noto Serif + Sillabazione IT) | Lettura Veloce (Bionic Focus Reading) | Modalità Notte (Inversione E-Ink 1-Bit) |
 | :---: | :---: | :---: |
 | <img src="docs/screenshots/03-reader-editorial.png" width="240" /> | <img src="docs/screenshots/04-reader-bionic-focus.png" width="240" /> | <img src="docs/screenshots/05-reader-night-mode.png" width="240" /> |
-
-### Kuro-Ink Pet Sanctuary, Hacker Matrix: Breach & Poster Sleep
-| Santuario di Kuro-Ink (Arconte LV.42) | Hacker Matrix: Breach (Cyber-Game + IMU) | Poster E-Ink Zero-Power |
-| :---: | :---: | :---: |
-| <img src="docs/screenshots/07-pet-sanctuary-archon.png" width="240" /> | <img src="docs/screenshots/09-hacker-matrix-breach.png" width="240" /> | <img src="docs/screenshots/12-sleep-poster.png" width="240" /> |
 
 ### Cyber-Net Wi-Fi Hub 2.0, Daily Ink Briefing & Telemetria
 | Cyber-Net Hub & Portale Web | Daily Ink Briefing (ANSA + HackerNews) | Telemetria & Giroscopio IMU |
@@ -36,7 +36,34 @@
 
 ## Caratteristiche Principali
 
-### 1. Studio Tipografico & Motore di Lettura Editoriale
+### 1. Cyber-Desk Ambient Stand (Orologio Meccanico Split-Flap & Meteo)
+- **Cifre Split-Flap Meccaniche Giganti (`18 : 25`)**: renderizzate in vettoriale procedurale 1-bit con fessura orizzontale centrale, viti angolari e cerniere laterali.
+- **Meteo Locale**: temperatura attuale, min/max, umidità, icone 1-bit (*Sole, Nuvole, Pioggia, Tempesta, Neve, Nebbia*) e stato sincronizzazione oraria.
+- **Bento Box Laterale**:
+  - **Mini-Calendario**: mese corrente con giorno odierno cerchiato a contrasto inverso.
+  - **Reading Streak**: streak di giorni consecutivi, pagine odierne e barra di avanzamento obiettivo.
+  - **Widget Configurabile (Tasto Destra)**:
+    - *Modalità A*: **GitHub Contribution Heatmap** (matrice 7×12 a 4 livelli di dither 1-bit).
+    * *Modalità B*: **Fase Lunare Astronomica** con calcolo del terminatore e percentuale illuminata.
+
+### 2. L'Oracolo & Oblique Strategies (Daily Stoic & Brian Eno)
+- **Due Mazzi Integrati in Flash (Zero RAM Dinamica)**:
+  - **Daily Stoic**: aforismi selezionati (*Marco Aurelio, Seneca, Epitteto, Calvino, Borges, Nietzsche*) con box di sfida/azione pratica per la giornata.
+  - **Oblique Strategies (Brian Eno & Peter Schmidt)**: il celebre mazzo per rompere i blocchi mentali e stimolare il pensiero laterale.
+- **Scuoti fisicamente l'Xteink X3 (IMU)**: l'accelerometro a 3 assi rileva lo scuotimento ed estrae istantaneamente una nuova carta rimescolata!
+
+### 3. La Cripta dei Tomi (Micro-RPG Testuale Procedurale)
+- Dungeon crawler a turni 100% testuale a scelte multiple, studiato specificamente per il refresh dell'E-Ink:
+  - **Stanze & Incontri Procedurali**: Vestiboli, Biblioteche Proibite, Cripte, Santuari e Forzieri.
+  - **Risorse & Combattimento**: Salute (HP), Torce, Grimaldelli, Monete, XP, Livello e Armi speciali, con registro eventi testuale.
+  - **Sinergia con i tuoi Libri**: ogni pagina letta in Inkling OS ricarica le tue Torce e cura i tuoi HP nel gioco!
+
+### 4. Connessione Wi-Fi Multi-Rete Intelligente
+- **Scansione Attiva dell'Etere (Air Scan)**: rileva automaticamente quale delle tue reti domestiche a 2.4 GHz è in portata e si aggancia a quella con segnale migliore.
+- **Fallback a Cascata**: se cambi casa o ti sposti, prova in sequenza le reti configurate.
+- **Configurazione Multi-Rete (`/.inkling/wifi.txt`)**: supporta fino a 8 reti memorizzate sulla microSD.
+
+### 5. Studio Tipografico & Motore di Lettura Editoriale
 - **4 Famiglie di Font in Flash (Zero RAM)**:
   - **Noto Serif** *(Default — ad alto contrasto e leggibilità su E-Ink 250 PPI)*
   - **Noto Sans** *(Sans-serif pulito e moderno)*
