@@ -12,6 +12,7 @@
 #include "inkling/reader/BookReader.h"
 #include "inkling/reader/Library.h"
 #include "inkling/rpg/TextRpgEngine.h"
+#include "inkling/settings/InklingSettings.h"
 
 namespace inkling {
 
@@ -30,6 +31,7 @@ class InklingApp {
     TextRpg,
     PetSanctuary,
     BreachGame,
+    Settings,
     Reader,
     ReaderMenu,
     Toc,
@@ -64,6 +66,7 @@ class InklingApp {
   void showTextRpg();
   void showPetSanctuary();
   void showBreachGame();
+  void showSettings();
   void onButton(Button button);
   // Feeds live IMU readings so a physical shake/tilt interacts with the Pet!
   void onImuSample(float ax, float ay, float az);
@@ -74,7 +77,7 @@ class InklingApp {
   Mode mode() const { return mode_; }
   void showDiagnostic();
   void refreshDiagnostic() {
-    if (mode_ == Mode::Diagnostic || mode_ == Mode::Home || mode_ == Mode::PetSanctuary) {
+    if (mode_ == Mode::Diagnostic || mode_ == Mode::Home || mode_ == Mode::PetSanctuary || mode_ == Mode::Settings) {
       ui_.invalidate(freeink::ui::RefreshHint::Fast);
     }
   }
@@ -91,8 +94,26 @@ class InklingApp {
   const Library& library() const { return library_; }
   const DeviceStatus& status() const { return status_; }
   const BookReader* reader() const { return reader_; }
+  const InklingSettings& settings() const { return settings_; }
+  InklingSettings& settings() { return settings_; }
   int activeBookIndex() const;
   ReaderLayout currentLayout() const;
+
+  using OrientationFn = void (*)(freeink::ui::Orientation orient, void* user);
+  void setOrientationHandler(OrientationFn fn, void* user) {
+    orientationFn_ = fn;
+    orientationUser_ = user;
+  }
+  void requestOrientation(freeink::ui::Orientation orient) {
+    if (orientationFn_) orientationFn_(orient, orientationUser_);
+  }
+  void onOrientationChanged(freeink::ui::Orientation orient) {
+    orientation_ = orient;
+    frame_.rotation = (orient == freeink::ui::Orientation::Portrait ? freeink::book::FrameRotation::Portrait
+                                                                    : freeink::book::FrameRotation::PortraitInverted);
+    ui_.invalidate(freeink::ui::RefreshHint::Fast);
+  }
+  freeink::ui::Orientation orientation() const { return orientation_; }
 
   // Screen functions read the app through the `user` pointer.
   static void homeScreen(UiApp::ScreenType& screen, void* user);
@@ -102,6 +123,7 @@ class InklingApp {
   static void textRpgScreen(UiApp::ScreenType& screen, void* user);
   static void petSanctuaryScreen(UiApp::ScreenType& screen, void* user);
   static void breachGameScreen(UiApp::ScreenType& screen, void* user);
+  static void settingsScreen(UiApp::ScreenType& screen, void* user);
   static void readerScreen(UiApp::ScreenType& screen, void* user);
   static void readerMenuScreen(UiApp::ScreenType& screen, void* user);
   static void tocScreen(UiApp::ScreenType& screen, void* user);
@@ -130,6 +152,8 @@ class InklingApp {
   void runMenuItem(int item);
   void runHomeDockItem(int item);
   void runSanctuaryAction(int item);
+  void adjustSettingItem(int item, int delta);
+  void runSettingItem(int item);
   void loadPrefs();
   void savePrefs();
   void setResumeLock(bool locked);
@@ -143,15 +167,19 @@ class InklingApp {
   void* presentUser_ = nullptr;
   RequestFn request_ = nullptr;
   void* requestUser_ = nullptr;
+  OrientationFn orientationFn_ = nullptr;
+  void* orientationUser_ = nullptr;
 
   Mode mode_ = Mode::Home;
+  freeink::ui::Orientation orientation_ = freeink::ui::Orientation::Portrait;
+  InklingSettings settings_;
   Library library_;
   PetEngine pet_;
   BreachGame breach_;
   DeskDashboard desk_;
   OracleDeck oracle_;
   TextRpgEngine rpg_;
-  Menu homeDock_, libraryMenu_, sanctuaryMenu_, readerMenu_, tocMenu_;
+  Menu homeDock_, libraryMenu_, sanctuaryMenu_, readerMenu_, tocMenu_, settingsMenu_;
   char lastBookPath_[128] = {};
   char message_[96] = {};
   freeink::book::BookStatus lastRenderStatus_ = freeink::book::BookStatus::Ok;

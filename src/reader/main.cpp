@@ -126,6 +126,34 @@ inkling::UiApp* ui = nullptr;
 inkling::InklingApp* app = nullptr;
 inkling::DeviceStatus status;
 
+freeink::ui::DisplayTarget* gDisplayTarget = nullptr;
+freeink::book::FrameTarget* gFrameTarget = nullptr;
+freeink::ui::Orientation currentOrientation = freeink::ui::Orientation::Portrait;
+
+void renderNow();
+
+void setAppOrientation(freeink::ui::Orientation orient) {
+  if (currentOrientation == orient) return;
+  LOG("switching orientation: %d -> %d", static_cast<int>(currentOrientation), static_cast<int>(orient));
+  currentOrientation = orient;
+  if (gDisplayTarget) {
+    gDisplayTarget->setOrientation(orient);
+    if (ui) ui->setDevice(gDisplayTarget->deviceContext());
+  }
+  if (gFrameTarget) {
+    gFrameTarget->rotation = (orient == freeink::ui::Orientation::Portrait ? freeink::book::FrameRotation::Portrait
+                                                                          : freeink::book::FrameRotation::PortraitInverted);
+  }
+  if (app) {
+    app->onOrientationChanged(orient);
+    renderNow();
+  }
+}
+
+void onOrientationRequest(freeink::ui::Orientation orient, void*) {
+  setAppOrientation(orient);
+}
+
 // The press that powered the device on is still held at boot; Power only arms
 // the power-off gesture after it has been released once.
 bool powerArmed = false;
@@ -205,9 +233,13 @@ void renderNow() {
 }
 
 RTC_DATA_ATTR bool rtcDeviceWasSleeping = false;
+RTC_DATA_ATTR uint16_t rtcWakeHoldThresholdMs = 350;
 
 [[noreturn]] void powerOff() {
   LOG("power off");
+  if (app) {
+    rtcWakeHoldThresholdMs = static_cast<uint16_t>(app->settings().wakeHoldMs());
+  }
   display->completeDisplay();
   app->shutdown();  // reading position is already saved per page; this closes files
   ui->setScreen(inkling::sleepScreen, app, freeink::ui::RefreshHint::Full);
@@ -274,20 +306,29 @@ bool dequeueButton(inkling::Button& out) {
 }
 
 void latchButtons() {
-  static constexpr struct {
+  const bool invertKeys = (currentOrientation == freeink::ui::Orientation::PortraitInverted) &&
+                          app && app->settings().invertKeysOn180;
+  struct ButtonMap {
     uint8_t hw;
     inkling::Button button;
-  } kMap[] = {
+  };
+  static constexpr ButtonMap kMapNormal[] = {
       {InputManager::BTN_BACK, inkling::Button::Back},   {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
       {InputManager::BTN_LEFT, inkling::Button::Left},   {InputManager::BTN_RIGHT, inkling::Button::Right},
       {InputManager::BTN_UP, inkling::Button::Up},       {InputManager::BTN_DOWN, inkling::Button::Down},
   };
-  for (const auto& m : kMap) {
-    if (!input.wasPressed(m.hw)) continue;
+  static constexpr ButtonMap kMapInverted[] = {
+      {InputManager::BTN_BACK, inkling::Button::Back},   {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
+      {InputManager::BTN_LEFT, inkling::Button::Right},  {InputManager::BTN_RIGHT, inkling::Button::Left},
+      {InputManager::BTN_UP, inkling::Button::Down},     {InputManager::BTN_DOWN, inkling::Button::Up},
+  };
+  const ButtonMap* map = invertKeys ? kMapInverted : kMapNormal;
+  for (size_t i = 0; i < 6; ++i) {
+    if (!input.wasPressed(map[i].hw)) continue;
     ensureCpuTurbo();
-    status.lastButton = InputManager::getButtonName(m.hw);
+    status.lastButton = InputManager::getButtonName(map[i].hw);
     status.buttonPresses++;
-    enqueueButton(m.button);
+    enqueueButton(map[i].button);
   }
 
   // Back held 3 s on the diagnostic screen: restart into the other slot. Only
@@ -360,8 +401,11 @@ void setup() {
     const int pressedLevel = pActiveHigh ? HIGH : LOW;
     pinMode(pPin, pActiveHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
 
+    const int targetSamples = (rtcWakeHoldThresholdMs >= 100 && rtcWakeHoldThresholdMs <= 1000)
+                                  ? (rtcWakeHoldThresholdMs / 10)
+                                  : 35;
     bool intentionalWake = true;
-    for (int i = 0; i < 35; ++i) {
+    for (int i = 0; i < targetSamples; ++i) {
       if (digitalRead(pPin) != pressedLevel) {
         intentionalWake = false;
         break;
@@ -419,16 +463,17 @@ void setup() {
 
   static freeink::ui::DisplayTarget displayTarget(display->getFrameBuffer(), display->getDisplayWidth(),
                                                   display->getDisplayHeight(), display->getDisplayWidthBytes());
+  gDisplayTarget = &displayTarget;
   inkling::ui::bindInklingFonts(displayTarget);
   static inkling::UiApp uiApp(displayTarget, displayTarget.deviceContext());
   ui = &uiApp;
 
-
-  freeink::book::FrameTarget frame{display->getFrameBuffer(), static_cast<int16_t>(display->getDisplayWidth()),
-                                   static_cast<int16_t>(display->getDisplayHeight()),
-                                   static_cast<int16_t>(display->getDisplayWidthBytes())};
+  static freeink::book::FrameTarget frame{display->getFrameBuffer(), static_cast<int16_t>(display->getDisplayWidth()),
+                                          static_cast<int16_t>(display->getDisplayHeight()),
+                                          static_cast<int16_t>(display->getDisplayWidthBytes())};
   frame.format = freeink::book::FrameFormat::Mono1Dithered;
   frame.rotation = freeink::book::FrameRotation::Portrait;
+  gFrameTarget = &frame;
 
   // Reader memory, right after the framebuffer while the heap is one block:
   // the fixed arenas first, then glyph caches sized from what is left. If even
@@ -502,6 +547,7 @@ void setup() {
   app = &inklingApp;
   app->setPresenter(presentFrame, nullptr);
   app->setRequestHandler(onAppRequest, nullptr);
+  app->setOrientationHandler(onOrientationRequest, nullptr);
 
   // SD self-update: works for any ESP32-C3 app, so CrossPet can be put back
   // the same way by saving its .bin as /inkling.bin.
@@ -522,6 +568,16 @@ void setup() {
     app->showDiagnostic();  // something to tell: start on the hardware screen
   } else {
     app->begin();  // library
+  }
+
+  if (app->settings().rotationMode == inkling::RotationMode::LockPortrait) {
+    setAppOrientation(freeink::ui::Orientation::Portrait);
+  } else if (app->settings().rotationMode == inkling::RotationMode::LockInverted) {
+    setAppOrientation(freeink::ui::Orientation::PortraitInverted);
+  } else if (app->settings().rotationMode == inkling::RotationMode::Auto) {
+    if (status.imuReady && status.ay > 0.42f && std::fabs(status.az) <= 0.75f) {
+      setAppOrientation(freeink::ui::Orientation::PortraitInverted);
+    }
   }
   app->update();
   display->completeDisplay();
@@ -557,7 +613,7 @@ void loop() {
     app->onButton(btn);
   }
 
-  if (status.imuReady && buttonQueueHead == buttonQueueTail && millis() - lastImuMs >= 500) {
+  if (status.imuReady && buttonQueueHead == buttonQueueTail && millis() - lastImuMs >= 200) {
     lastImuMs = millis();
     freeink::Imu::Sample sample;
     if (imu.read(sample)) {
@@ -577,6 +633,39 @@ void loop() {
       status.ax = sample.ax;
       status.ay = sample.ay;
       status.az = sample.az;
+
+      // Dynamic Auto-Rotation via Accelerometer (0° <-> 180°)
+      if (app && app->settings().rotationMode == inkling::RotationMode::Auto) {
+        static freeink::ui::Orientation candidate = freeink::ui::Orientation::Portrait;
+        static uint8_t holdCount = 0;
+
+        // If resting flat on desk / table (|az| > 0.75g), hold previous orientation (anti-jitter)
+        if (std::fabs(sample.az) <= 0.75f) {
+          freeink::ui::Orientation detected = currentOrientation;
+          if (sample.ay < -0.42f) {
+            detected = freeink::ui::Orientation::Portrait;
+          } else if (sample.ay > 0.42f) {
+            detected = freeink::ui::Orientation::PortraitInverted;
+          }
+
+          if (detected != currentOrientation) {
+            if (detected == candidate) {
+              if (++holdCount >= 3) {  // Held steadily for ~600ms
+                setAppOrientation(detected);
+                holdCount = 0;
+              }
+            } else {
+              candidate = detected;
+              holdCount = 1;
+            }
+          } else {
+            holdCount = 0;
+          }
+        } else {
+          holdCount = 0;
+        }
+      }
+
       if (app->mode() == inkling::InklingApp::Mode::Home ||
           app->mode() == inkling::InklingApp::Mode::PetSanctuary ||
           app->mode() == inkling::InklingApp::Mode::BreachGame ||
@@ -593,13 +682,11 @@ void loop() {
 
   app->update();
 
-  // 5-minute inactivity auto-sleep:
-  // If nobody interacts with the device (no buttons pressed, no movement) for 5 minutes,
-  // enter deep sleep with the sleep poster / lock screen.
-  // Exception: Desk Ambient mode while plugged into USB charging (acts as an ambient desk clock).
+  // Inactivity auto-sleep (configurable in Settings):
+  const unsigned long autoSleepTimeoutMs = app ? app->settings().autoSleepTimeoutMs() : (5UL * 60UL * 1000UL);
   const bool isDeskClockOnUsb = (app->mode() == inkling::InklingApp::Mode::DeskAmbient) && status.charging;
-  if (!isDeskClockOnUsb && (millis() - lastActivityMs >= kAutoSleepTimeoutMs)) {
-    LOG("inactivity timeout (5 minutes with no interaction): entering auto-sleep");
+  if (!isDeskClockOnUsb && autoSleepTimeoutMs != 0xFFFFFFFFUL && (millis() - lastActivityMs >= autoSleepTimeoutMs)) {
+    LOG("inactivity timeout (%lu ms): entering auto-sleep", autoSleepTimeoutMs);
     powerOff();
   }
 

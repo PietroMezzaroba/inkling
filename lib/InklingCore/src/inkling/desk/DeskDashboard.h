@@ -40,6 +40,7 @@ class DeskDashboard {
   DeskDashboard();
 
   DeskSubWidget activeSubWidget() const { return subWidget_; }
+  void setSubWidget(DeskSubWidget widget) { subWidget_ = widget; }
   void cycleSubWidget() {
     subWidget_ = static_cast<DeskSubWidget>((static_cast<uint8_t>(subWidget_) + 1) % 3);
   }

@@ -17,8 +17,6 @@ using freeink::ui::RefreshHint;
 
 // Futuristic status HUD height at the bottom of the reader page.
 constexpr int16_t kStatusLineHeight = 38;
-// Only run a full scrub every 24th page turn so reading stays ultra-fluid.
-constexpr uint8_t kFullRefreshEvery = 24;
 
 // CrossPet-calibrated em-box heights in pixels on the X3's 250 ppi panel.
 // In stb_truetype, sizePx spans (ascent - descent): 42 px matches CrossPet's 14-16pt Noto Serif.
@@ -85,8 +83,22 @@ enum ReaderMenuItem : int {
   kMenuSpacing = 5,
   kMenuAlignment = 6,
   kMenuNightMode = 7,
-  kMenuHome = 8,
-  kMenuCount = 9,
+  kMenuSettings = 8,
+  kMenuHome = 9,
+  kMenuCount = 10,
+};
+
+enum SettingsItem : int {
+  kSetRotation = 0,
+  kSetInvertKeys = 1,
+  kSetAutoSleep = 2,
+  kSetWakeSensitivity = 3,
+  kSetRefreshCadence = 4,
+  kSetDeskWidget = 5,
+  kSetTheme = 6,
+  kSetWifiOta = 7,
+  kSetDiagnostic = 8,
+  kSetCount = 9,
 };
 
 enum HomeDockItem : int {
@@ -161,10 +173,19 @@ int InklingApp::activeBookIndex() const {
 
 void InklingApp::begin() {
   storage_.mkdirs("/.inkling");
+  settings_.load(storage_);
+  desk_.setSubWidget(static_cast<DeskSubWidget>(settings_.deskWidget));
+  nightMode_ = settings_.nightMode;
+  if (settings_.rotationMode == RotationMode::LockPortrait) {
+    requestOrientation(freeink::ui::Orientation::Portrait);
+  } else if (settings_.rotationMode == RotationMode::LockInverted) {
+    requestOrientation(freeink::ui::Orientation::PortraitInverted);
+  }
   loadPrefs();
   library_.scan(storage_);
   pet_.load(storage_, currentLocalTime());
   homeDock_.reset(kDockCount, 0);
+  settingsMenu_.reset(kSetCount, 0);
   sanctuaryMenu_.reset(kActCount, 0);
   INKLING_LOG("library: %d books, pet lv %u (%lu pages)", library_.count(),
               static_cast<unsigned>(pet_.state().level), static_cast<unsigned long>(pet_.state().totalPagesRead));
@@ -224,6 +245,13 @@ void InklingApp::showTextRpg() {
   cursorOnlyRedraw_ = false;
   mode_ = Mode::TextRpg;
   ui_.setScreen(textRpgScreen, this, RefreshHint::Fast);
+}
+
+void InklingApp::showSettings() {
+  settingsMenu_.reset(kSetCount, 0);
+  cursorOnlyRedraw_ = false;
+  mode_ = Mode::Settings;
+  ui_.setScreen(settingsScreen, this, RefreshHint::Fast);
 }
 
 void InklingApp::showPetSanctuary() {
@@ -428,7 +456,7 @@ void InklingApp::turnPage(bool forward) {
     pet_.consumeBannerTick();
   }
 
-  if (++turnsSinceFull_ >= kFullRefreshEvery) {
+  if (++turnsSinceFull_ >= settings_.fullRefreshPages()) {
     turnsSinceFull_ = 0;
     ui_.invalidate(RefreshHint::Full);
   } else {
@@ -530,6 +558,9 @@ void InklingApp::adjustMenuItem(int item, int delta) {
     case kMenuNightMode:
       nightMode_ = !nightMode_;
       break;
+    case kMenuSettings:
+      showSettings();
+      return;
     case kMenuHome:
       if (reader_) reader_->close();
       showPetSanctuary();
@@ -552,6 +583,7 @@ void InklingApp::runMenuItem(int item) {
     case kMenuSpacing:      adjustMenuItem(kMenuSpacing, 1); break;
     case kMenuAlignment:    adjustMenuItem(kMenuAlignment, 1); break;
     case kMenuNightMode:    adjustMenuItem(kMenuNightMode, 1); break;
+    case kMenuSettings:     showSettings(); break;
     case kMenuHome:         closeBook(); break;
     default:                break;
   }
@@ -564,8 +596,79 @@ void InklingApp::runHomeDockItem(int item) {
     case kDockDesk:    showDeskAmbient(); break;
     case kDockOracle:  showOracle(); break;
     case kDockRpg:     showTextRpg(); break;
-    case kDockSystem:  showDiagnostic(); break;
+    case kDockSystem:  showSettings(); break;
     default:           break;
+  }
+}
+
+void InklingApp::adjustSettingItem(int item, int delta) {
+  switch (item) {
+    case kSetRotation:
+      settings_.cycleRotationMode(delta);
+      if (settings_.rotationMode == RotationMode::LockPortrait) {
+        requestOrientation(freeink::ui::Orientation::Portrait);
+      } else if (settings_.rotationMode == RotationMode::LockInverted) {
+        requestOrientation(freeink::ui::Orientation::PortraitInverted);
+      } else if (settings_.rotationMode == RotationMode::Auto) {
+        if (prevAy_ < -0.40f) {
+          requestOrientation(freeink::ui::Orientation::Portrait);
+        } else if (prevAy_ > 0.40f) {
+          requestOrientation(freeink::ui::Orientation::PortraitInverted);
+        }
+      }
+      break;
+
+    case kSetInvertKeys:
+      settings_.cycleInvertKeys();
+      break;
+
+    case kSetAutoSleep:
+      settings_.cycleAutoSleep(delta);
+      break;
+
+    case kSetWakeSensitivity:
+      settings_.cycleWakeSensitivity(delta);
+      break;
+
+    case kSetRefreshCadence:
+      settings_.cycleRefreshCadence(delta);
+      break;
+
+    case kSetDeskWidget:
+      settings_.cycleDeskWidget(delta);
+      desk_.setSubWidget(static_cast<DeskSubWidget>(settings_.deskWidget));
+      break;
+
+    case kSetTheme:
+      settings_.toggleNightMode();
+      nightMode_ = settings_.nightMode;
+      savePrefs();
+      break;
+
+    case kSetWifiOta:
+    case kSetDiagnostic:
+      break;
+
+    default:
+      return;
+  }
+  settings_.save(storage_);
+  cursorOnlyRedraw_ = false;
+  ui_.invalidate(RefreshHint::Fast);
+}
+
+void InklingApp::runSettingItem(int item) {
+  switch (item) {
+    case kSetWifiOta:
+      settings_.save(storage_);
+      if (request_) request_(Request::WifiUpdate, requestUser_);
+      break;
+    case kSetDiagnostic:
+      showDiagnostic();
+      break;
+    default:
+      adjustSettingItem(item, 1);
+      break;
   }
 }
 
@@ -761,6 +864,27 @@ void InklingApp::onButton(Button button) {
       break;
     }
 
+    case Mode::Settings:
+      if (button == Button::Up) {
+        settingsMenu_.move(-1);
+        cursorOnlyRedraw_ = true;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Down) {
+        settingsMenu_.move(1);
+        cursorOnlyRedraw_ = true;
+        ui_.invalidate(RefreshHint::Fast);
+      } else if (button == Button::Left) {
+        adjustSettingItem(settingsMenu_.selected, -1);
+      } else if (button == Button::Right) {
+        adjustSettingItem(settingsMenu_.selected, 1);
+      } else if (button == Button::Confirm) {
+        runSettingItem(settingsMenu_.selected);
+      } else if (button == Button::Back) {
+        settings_.save(storage_);
+        showHome();
+      }
+      break;
+
     case Mode::Reader:
       if (down) turnPage(true);
       if (up) turnPage(false);
@@ -922,7 +1046,7 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
       "DESK STAND & METEO",
       "ORACOLO FILOSOFIA",
       "CRIPTA DEI TOMI",
-      "SISTEMA & WI-FI",
+      "IMPOSTAZIONI & SISTEMA",
   };
   static const Icon kDockIcons[kDockCount] = {
       Icon::Book,
@@ -941,7 +1065,7 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
   snprintf(sub2, sizeof(sub2), "Split-Flap · 18°C Meteo");
   snprintf(sub3, sizeof(sub3), "Daily Stoic & Brian Eno");
   snprintf(sub4, sizeof(sub4), "Rogue RPG · Piano %d", self.rpg_.depth());
-  snprintf(sub5, sizeof(sub5), "Giornale ANSA & OTA");
+  snprintf(sub5, sizeof(sub5), "Rotazione, Sleep, Wi-Fi");
   const char* const subs[kDockCount] = {sub0, sub1, sub2, sub3, sub4, sub5};
 
   const int16_t tileW = static_cast<int16_t>((w - 40) / 2);
@@ -1504,14 +1628,15 @@ void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
       "SPAZIATURA PAGINA",
       "IMPAGINAZIONE",
       "MODALITÀ NOTTE",
+      "IMPOSTAZIONI SISTEMA",
       "CHIUDI LIBRO",
   };
   static const Icon kRowIcons[kMenuCount] = {
       Icon::Book,    Icon::Compass, Icon::Spark, Icon::Sliders, Icon::Flame,
-      Icon::Sliders, Icon::Check,   Icon::Moon,  Icon::Crystal,
+      Icon::Sliders, Icon::Check,   Icon::Moon,  Icon::Sliders, Icon::Crystal,
   };
 
-  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48], v8[48];
+  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48], v8[48], v9[48];
   snprintf(v0, sizeof(v0), self.layoutDirty_ ? "OK: Applica   ·   SX/DX: -/+ 10%%"
                                              : "OK: Continua   ·   SX/DX: -/+ 10%%");
   snprintf(v1, sizeof(v1), "Cap. %u di %u   ·   OK: Apri indice",
@@ -1523,9 +1648,10 @@ void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
   snprintf(v5, sizeof(v5), "<   %s   >", kSpacingPresets[spStep].label);
   snprintf(v6, sizeof(v6), "<   %s   >", kAlignPresets[alStep].label);
   snprintf(v7, sizeof(v7), "<   %s   >", self.nightMode_ ? "ON (Scuro)" : "OFF (Chiaro)");
-  snprintf(v8, sizeof(v8), "OK: Home   ·   SX/DX: Santuario Pet");
+  snprintf(v8, sizeof(v8), "Rotazione, Sleep, Wi-Fi   ·   OK: Apri");
+  snprintf(v9, sizeof(v9), "OK: Home   ·   SX/DX: Santuario Pet");
 
-  const char* const values[kMenuCount] = {v0, v1, v2, v3, v4, v5, v6, v7, v8};
+  const char* const values[kMenuCount] = {v0, v1, v2, v3, v4, v5, v6, v7, v8, v9};
 
   constexpr int kVisCards = 4;
   int first = (sel / kVisCards) * kVisCards;
@@ -1635,6 +1761,114 @@ void InklingApp::tocScreen(UiApp::ScreenType& screen, void* user) {
 
   if (!self.cursorOnlyRedraw_) {
     drawBottomKeyBar(t, "SU/GIU", "Capitolo", "OK", "Vai a capitolo", "BACK", "Menu");
+  }
+  self.cursorOnlyRedraw_ = false;
+}
+
+void InklingApp::settingsScreen(UiApp::ScreenType& screen, void* user) {
+  auto& self = *static_cast<InklingApp*>(user);
+  auto& t = screen.target();
+  const int16_t w = kScreenW;
+  const int sel = self.settingsMenu_.selected;
+
+  if (self.cursorOnlyRedraw_) {
+    clearBandY(42, 746);
+  } else {
+    clearScreen();
+    drawTopHud(t, self.status_, self.pet_, "IMPOSTAZIONI");
+  }
+
+  // Subheader
+  char countTxt[64];
+  snprintf(countTxt, sizeof(countTxt), "STUDIO HARDWARE & SISTEMA  ·  VOCE %d/%d", sel + 1, static_cast<int>(kSetCount));
+  drawText(t, Rect{18, 46, static_cast<int16_t>(w - 36), 22}, countTxt, kFontMicro, Color::Black);
+
+  // 5 Big Rich Cards per page
+  constexpr int kVisCards = 5;
+  int first = (sel / kVisCards) * kVisCards;
+  if (first > kSetCount - kVisCards) first = kSetCount - kVisCards;
+  if (first < 0) first = 0;
+
+  static const char* const kTitles[kSetCount] = {
+      "ROTAZIONE DISPLAY",
+      "INVERSIONE TASTI 180°",
+      "TIMER AUTO-SLEEP",
+      "SENSIBILITÀ POWER",
+      "ANTI-GHOSTING REFRESH",
+      "WIDGET DESK STAND",
+      "TEMA & CONTRASTO",
+      "WI-FI & CYBER-NET",
+      "RADAR DIAGNOSTICA",
+  };
+
+  static const char* const kSubtitles[kSetCount] = {
+      "Sensore accelerometro QMI8658 / Blocco fisso",
+      "Inverte Up/Down & Left/Right a 180° per uso naturale",
+      "Spegnimento automatico se non toccato per risparmio",
+      "Filtro anti-rimbalzo per risveglio intenzionale",
+      "Frequenza pulizia totale della matrice E-Ink",
+      "Widget visualizzato nella dock split-flap da tavolo",
+      "Inversione colori giorno/notte ad alto contrasto",
+      "Connessione reti multiple, meteo e download OTA",
+      "Radar IMU 3 assi tempo reale, RTC DS3231 e memoria",
+  };
+
+  static const Icon kIcons[kSetCount] = {
+      Icon::Compass,
+      Icon::Sliders,
+      Icon::Moon,
+      Icon::Spark,
+      Icon::Spark,
+      Icon::Compass,
+      Icon::Sliders,
+      Icon::Wifi,
+      Icon::Sliders,
+  };
+
+  char v0[64], v1[64], v2[64], v3[64], v4[64], v5[64], v6[64], v7[64], v8[64];
+  snprintf(v0, sizeof(v0), "<  %s  >", self.settings_.rotationModeLabel());
+  snprintf(v1, sizeof(v1), "<  %s  >", self.settings_.invertKeysLabel());
+  snprintf(v2, sizeof(v2), "<  %s  >", self.settings_.autoSleepLabel());
+  snprintf(v3, sizeof(v3), "<  %s  >", self.settings_.wakeSensitivityLabel());
+  snprintf(v4, sizeof(v4), "<  %s  >", self.settings_.refreshCadenceLabel());
+  snprintf(v5, sizeof(v5), "<  %s  >", self.settings_.deskWidgetLabel());
+  snprintf(v6, sizeof(v6), "<  %s  >", self.settings_.nightModeLabel());
+  snprintf(v7, sizeof(v7), "[ PREMI OK PER AVVIARE HUB ]");
+  snprintf(v8, sizeof(v8), "[ PREMI OK PER APRIRE RADAR ]");
+  const char* const values[kSetCount] = {v0, v1, v2, v3, v4, v5, v6, v7, v8};
+
+  const int16_t startY = 72;
+  const int16_t cardH = 124;
+  const int16_t gapY = 8;
+
+  for (int slot = 0; slot < kVisCards; ++slot) {
+    const int idx = first + slot;
+    if (idx >= kSetCount) break;
+    const int16_t cy = static_cast<int16_t>(startY + slot * (cardH + gapY));
+    const bool isSel = (idx == sel);
+    const Rect cr{14, cy, static_cast<int16_t>(w - 28), cardH};
+
+    drawCard(t, cr, 8, isSel ? 3 : 2, false, false);
+    if (isSel) {
+      drawPill(t, static_cast<int16_t>(w - 130), static_cast<int16_t>(cy + 10), 22, "ATTIVO", kFontMicro, false, 8);
+    }
+
+    drawIcon16(t, static_cast<int16_t>(cr.x + 14), static_cast<int16_t>(cy + 14), kIcons[idx], Color::Black);
+    drawText(t, Rect{static_cast<int16_t>(cr.x + 38), static_cast<int16_t>(cy + 12), static_cast<int16_t>(cr.width - 170), 24},
+             kTitles[idx], kFontBody, Color::Black);
+    drawText(t, Rect{static_cast<int16_t>(cr.x + 14), static_cast<int16_t>(cy + 40), static_cast<int16_t>(cr.width - 28), 20},
+             kSubtitles[idx], kFontMicro, Color::Black);
+
+    // Value selector bar at the bottom of the card
+    const Rect valR{static_cast<int16_t>(cr.x + 10), static_cast<int16_t>(cy + 66), static_cast<int16_t>(cr.width - 20), 46};
+    fastFill(t, valR, Paint::solid(isSel ? Color::Black : Color::White), 6);
+    fastStroke(t, valR, Paint::solid(Color::Black), isSel ? 3 : 1, 6);
+    drawText(t, Rect{static_cast<int16_t>(valR.x + 6), static_cast<int16_t>(valR.y + 10), static_cast<int16_t>(valR.width - 12), 26},
+             values[idx], kFontTitle, isSel ? Color::White : Color::Black, TextAlign::Center, false);
+  }
+
+  if (!self.cursorOnlyRedraw_) {
+    drawBottomKeyBar(t, "FRECCE", "Regola", "OK", "Conferma", "BACK", "Salva & Esci");
   }
   self.cursorOnlyRedraw_ = false;
 }

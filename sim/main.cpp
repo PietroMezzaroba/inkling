@@ -330,6 +330,17 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
   ui.invalidate(freeink::ui::RefreshHint::Full);
   app.update();
 
+  // 16. Test Settings Studio: Display Auto-Rotation, Rotation Lock, Inverted Keys, Sleep Timer
+  rec.label = "settings-studio";
+  app.showSettings();
+  app.update();
+  step("settings-cycle-rotation", B::Right);  // Switch to Blocco 0°
+  step("settings-down-invert", B::Down);
+  step("settings-cycle-invert", B::Right);    // Toggle key inversion
+  step("settings-down-sleep", B::Down);
+  step("settings-cycle-sleep", B::Right);     // Cycle auto-sleep timer
+  step("settings-back-home", B::Back);        // Save & return to home
+
   app.shutdown();
   return 0;
 }
