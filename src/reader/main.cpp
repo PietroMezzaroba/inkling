@@ -18,6 +18,7 @@
 #include <SPI.h>
 #include <XteinkDetect.h>
 
+#include <cmath>
 #include <new>
 
 #include "DeviceLog.h"
@@ -99,6 +100,8 @@ namespace {
 
 // Holding Power this long turns the device off.
 constexpr unsigned long kPowerOffHoldMs = 1000;
+// Inactivity timeout: automatically sleep if untouched for 5 minutes.
+constexpr unsigned long kAutoSleepTimeoutMs = 5UL * 60UL * 1000UL;
 // Holding Back this long on the diagnostic screen restarts into the other slot.
 constexpr unsigned long kOtherSlotHoldMs = 3000;
 // How long Back is sampled at boot for the "hold Back while powering on" escape.
@@ -308,13 +311,25 @@ void latchButtons() {
 
   const bool powerDown = input.isPressed(InputManager::BTN_POWER);
   if (!powerDown) {
+    if (powerArmed && powerPressedAt > 0) {
+      const unsigned long duration = millis() - powerPressedAt;
+      powerPressedAt = 0;
+      // Single click on Power button (press and release): enter sleep immediately!
+      if (duration >= 40 && duration < 900) {
+        LOG("power button clicked (%lu ms): going to sleep", duration);
+        powerOff();
+      }
+    }
     powerArmed = true;
     powerPressedAt = 0;
     return;
   }
   if (!powerArmed) return;
   if (powerPressedAt == 0) powerPressedAt = millis();
-  if (millis() - powerPressedAt >= kPowerOffHoldMs) powerOff();
+  if (millis() - powerPressedAt >= kPowerOffHoldMs) {
+    LOG("power button held: going to sleep");
+    powerOff();
+  }
 }
 
 }  // namespace
@@ -333,9 +348,11 @@ void setup() {
   // powering on restarts into the other slot (e.g. the previous CrossPet).
   input.begin();
 
-  // Spurious wake-up filter: if the device was asleep (lock screen displayed),
-  // unplugging or plugging the USB charger causes a momentary power transient
-  // that can wake the MCU. Verify that the Power button is held intentionally.
+  // Filter accidental/spurious wake-ups while asleep:
+  // When sleeping with lock screen, waking up requires a deliberate, intentional
+  // press on the Power button (held continuously for at least 350 ms).
+  // A momentary bump, accidental tap (< 350 ms), charger disconnect or electrical glitch
+  // is ignored and the device returns immediately to deep sleep!
   const esp_reset_reason_t resetReason = esp_reset_reason();
   if (rtcDeviceWasSleeping) {
     const int8_t pPin = BoardConfig::ACTIVE.input.power;
@@ -343,20 +360,20 @@ void setup() {
     const int pressedLevel = pActiveHigh ? HIGH : LOW;
     pinMode(pPin, pActiveHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
 
-    bool intentionalWake = false;
-    for (int i = 0; i < 8; ++i) {
-      if (digitalRead(pPin) == pressedLevel) {
-        intentionalWake = true;
+    bool intentionalWake = true;
+    for (int i = 0; i < 35; ++i) {
+      if (digitalRead(pPin) != pressedLevel) {
+        intentionalWake = false;
         break;
       }
-      delay(5);
+      delay(10);
     }
 
     if (!intentionalWake) {
-      LOG("spurious wake while asleep (reset reason %d, charger unplugged/plugged), returning to sleep",
+      LOG("ignoring accidental/short wake while asleep (held < 350ms, reason %d), returning to sleep",
           static_cast<int>(resetReason));
       // Return immediately to sleep: DO NOT touch display, SPI, SD card, or UI!
-      // The lock screen remains intact on the bistable E-Ink panel.
+      // The lock screen remains perfectly intact on the bistable E-Ink panel.
       freeink::PowerManager::powerDownRailsForSleep();
       freeink::PowerManager::deepSleepUntilPowerButton();
     }
@@ -542,14 +559,28 @@ void loop() {
 
   if (status.imuReady && buttonQueueHead == buttonQueueTail && millis() - lastImuMs >= 500) {
     lastImuMs = millis();
-    if (app->mode() == inkling::InklingApp::Mode::Home ||
-        app->mode() == inkling::InklingApp::Mode::PetSanctuary ||
-        app->mode() == inkling::InklingApp::Mode::BreachGame) {
-      freeink::Imu::Sample sample;
-      if (imu.read(sample)) {
-        status.ax = sample.ax;
-        status.ay = sample.ay;
-        status.az = sample.az;
+    freeink::Imu::Sample sample;
+    if (imu.read(sample)) {
+      static float prevAx = 0, prevAy = 0, prevAz = 0;
+      const float dAx = std::fabs(sample.ax - prevAx);
+      const float dAy = std::fabs(sample.ay - prevAy);
+      const float dAz = std::fabs(sample.az - prevAz);
+      prevAx = sample.ax;
+      prevAy = sample.ay;
+      prevAz = sample.az;
+
+      // Picking up or tilting the device counts as user activity
+      if (dAx > 0.18f || dAy > 0.18f || dAz > 0.18f) {
+        lastActivityMs = millis();
+      }
+
+      status.ax = sample.ax;
+      status.ay = sample.ay;
+      status.az = sample.az;
+      if (app->mode() == inkling::InklingApp::Mode::Home ||
+          app->mode() == inkling::InklingApp::Mode::PetSanctuary ||
+          app->mode() == inkling::InklingApp::Mode::BreachGame ||
+          app->mode() == inkling::InklingApp::Mode::Oracle) {
         app->onImuSample(sample.ax, sample.ay, sample.az);
       }
     }
@@ -561,6 +592,16 @@ void loop() {
   }
 
   app->update();
+
+  // 5-minute inactivity auto-sleep:
+  // If nobody interacts with the device (no buttons pressed, no movement) for 5 minutes,
+  // enter deep sleep with the sleep poster / lock screen.
+  // Exception: Desk Ambient mode while plugged into USB charging (acts as an ambient desk clock).
+  const bool isDeskClockOnUsb = (app->mode() == inkling::InklingApp::Mode::DeskAmbient) && status.charging;
+  if (!isDeskClockOnUsb && (millis() - lastActivityMs >= kAutoSleepTimeoutMs)) {
+    LOG("inactivity timeout (5 minutes with no interaction): entering auto-sleep");
+    powerOff();
+  }
 
   // Smart Dynamic Power Management:
   // Stay at 160 MHz + 2 ms polling for 3 seconds after any button press or
