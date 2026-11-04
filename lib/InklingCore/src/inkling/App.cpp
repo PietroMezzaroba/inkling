@@ -139,6 +139,7 @@ InklingApp::InklingApp(Storage& storage, BookReader* reader, DeviceStatus& statu
                        const freeink::book::FrameTarget& frame)
     : storage_(storage), reader_(reader), status_(status), ui_(ui), frame_(frame) {
   canvas::bindFramebuffer(frame_.framebuffer, frame_.width, frame_.height, frame_.widthBytes);
+  canvas::setCanvasOrientation(orientation_);
 }
 
 LocalTime InklingApp::currentLocalTime() const {

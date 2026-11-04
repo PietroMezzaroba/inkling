@@ -31,6 +31,11 @@ static constexpr int16_t kScreenH = 792;
 // than per-pixel plotting on the 160 MHz ESP32-C3.
 void bindFramebuffer(uint8_t* fb, int16_t panelWidth, int16_t panelHeight, int16_t panelWidthBytes);
 
+// Sets the active orientation (Portrait 0° or PortraitInverted 180°) so
+// fast span blitters map rows and columns accurately into the panel buffer.
+void setCanvasOrientation(freeink::ui::Orientation orient);
+freeink::ui::Orientation canvasOrientation();
+
 // Full-screen white clear via memset (~0.12 ms vs ~60 ms per-pixel fill).
 void clearScreen();
 

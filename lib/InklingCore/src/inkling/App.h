@@ -111,6 +111,8 @@ class InklingApp {
     orientation_ = orient;
     frame_.rotation = (orient == freeink::ui::Orientation::Portrait ? freeink::book::FrameRotation::Portrait
                                                                     : freeink::book::FrameRotation::PortraitInverted);
+    ui::canvas::setCanvasOrientation(orient);
+    cursorOnlyRedraw_ = false;
     ui_.invalidate(freeink::ui::RefreshHint::Fast);
   }
   freeink::ui::Orientation orientation() const { return orientation_; }

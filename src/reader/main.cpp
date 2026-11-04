@@ -136,6 +136,7 @@ void setAppOrientation(freeink::ui::Orientation orient) {
   if (currentOrientation == orient) return;
   LOG("switching orientation: %d -> %d", static_cast<int>(currentOrientation), static_cast<int>(orient));
   currentOrientation = orient;
+  inkling::ui::canvas::setCanvasOrientation(orient);
   if (gDisplayTarget) {
     gDisplayTarget->setOrientation(orient);
     if (ui) ui->setDevice(gDisplayTarget->deviceContext());
@@ -146,7 +147,6 @@ void setAppOrientation(freeink::ui::Orientation orient) {
   }
   if (app) {
     app->onOrientationChanged(orient);
-    renderNow();
   }
 }
 
@@ -389,40 +389,21 @@ void setup() {
   // powering on restarts into the other slot (e.g. the previous CrossPet).
   input.begin();
 
-  // Filter accidental/spurious wake-ups while asleep:
-  // When sleeping with lock screen, waking up requires a deliberate, intentional
-  // press on the Power button (held continuously for at least 350 ms).
-  // A momentary bump, accidental tap (< 350 ms), charger disconnect or electrical glitch
-  // is ignored and the device returns immediately to deep sleep!
+  // Spurious / glitch wake-up filter while asleep:
+  // When the device is asleep with the lock screen displayed, waking up occurs
+  // when the user clicks or presses the Power button (ESP_SLEEP_WAKEUP_GPIO).
+  // Non-GPIO events (such as power glitches or brownout from plugging / unplugging the USB cable)
+  // are detected and ignored, keeping the lock screen intact and returning to sleep immediately.
   const esp_reset_reason_t resetReason = esp_reset_reason();
+  const esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
   if (rtcDeviceWasSleeping) {
-    const int8_t pPin = BoardConfig::ACTIVE.input.power;
-    const bool pActiveHigh = BoardConfig::ACTIVE.input.powerActiveHigh;
-    const int pressedLevel = pActiveHigh ? HIGH : LOW;
-    pinMode(pPin, pActiveHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
-
-    const int targetSamples = (rtcWakeHoldThresholdMs >= 100 && rtcWakeHoldThresholdMs <= 1000)
-                                  ? (rtcWakeHoldThresholdMs / 10)
-                                  : 35;
-    bool intentionalWake = true;
-    for (int i = 0; i < targetSamples; ++i) {
-      if (digitalRead(pPin) != pressedLevel) {
-        intentionalWake = false;
-        break;
-      }
-      delay(10);
-    }
-
-    if (!intentionalWake) {
-      LOG("ignoring accidental/short wake while asleep (held < 350ms, reason %d), returning to sleep",
-          static_cast<int>(resetReason));
-      // Return immediately to sleep: DO NOT touch display, SPI, SD card, or UI!
-      // The lock screen remains perfectly intact on the bistable E-Ink panel.
+    if (resetReason != ESP_RST_DEEPSLEEP || wakeupCause != ESP_SLEEP_WAKEUP_GPIO) {
+      LOG("ignoring non-gpio glitch wake while asleep (reason %d, cause %d), returning to sleep",
+          static_cast<int>(resetReason), static_cast<int>(wakeupCause));
       freeink::PowerManager::powerDownRailsForSleep();
       freeink::PowerManager::deepSleepUntilPowerButton();
     }
-
-    // Intentional wake-up: clear flag and continue normal boot
+    // Genuine power button click / press: wake up immediately!
     rtcDeviceWasSleeping = false;
   }
 
@@ -642,15 +623,15 @@ void loop() {
         // If resting flat on desk / table (|az| > 0.75g), hold previous orientation (anti-jitter)
         if (std::fabs(sample.az) <= 0.75f) {
           freeink::ui::Orientation detected = currentOrientation;
-          if (sample.ay < -0.42f) {
+          if (sample.ay < -0.45f) {
             detected = freeink::ui::Orientation::Portrait;
-          } else if (sample.ay > 0.42f) {
+          } else if (sample.ay > 0.45f) {
             detected = freeink::ui::Orientation::PortraitInverted;
           }
 
           if (detected != currentOrientation) {
             if (detected == candidate) {
-              if (++holdCount >= 3) {  // Held steadily for ~600ms
+              if (++holdCount >= 4) {  // Held steadily for ~800ms
                 setAppOrientation(detected);
                 holdCount = 0;
               }

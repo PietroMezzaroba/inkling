@@ -13,6 +13,7 @@ uint8_t* g_fb = nullptr;
 int16_t g_pw = 792;
 int16_t g_ph = 528;
 int16_t g_pwb = 99;
+freeink::ui::Orientation g_orientation = freeink::ui::Orientation::Portrait;
 
 int16_t isqrt32(int32_t n) {
   if (n <= 0) return 0;
@@ -25,14 +26,19 @@ int16_t isqrt32(int32_t n) {
   return static_cast<int16_t>(x);
 }
 
-uint8_t ditherInkMask(int16_t x, uint8_t threshold) {
+uint8_t ditherInkMask(int16_t x, uint8_t threshold, bool inverted = false) {
   static constexpr uint8_t kBayer[4][4] = {
       {0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
   const int xm = x & 3;
   uint8_t m = 0;
   for (int k = 0; k < 4; ++k) {
     if (kBayer[k][xm] < threshold) {
-      m = static_cast<uint8_t>(m | (0x80u >> k) | (0x08u >> k));
+      if (inverted) {
+        const int bitPos = 3 - k;
+        m = static_cast<uint8_t>(m | (0x80u >> bitPos) | (0x08u >> bitPos));
+      } else {
+        m = static_cast<uint8_t>(m | (0x80u >> k) | (0x08u >> k));
+      }
     }
   }
   return m;
@@ -41,6 +47,8 @@ uint8_t ditherInkMask(int16_t x, uint8_t threshold) {
 // Fills logical vertical span y in [y0, y1) at column x directly in the portrait framebuffer.
 // In Portrait mode (px = y, py = g_ph - 1 - x), a vertical span in logical space is a
 // contiguous horizontal byte range in row `py` of `g_fb`!
+// In PortraitInverted mode (px = (g_pw - 1) - y, py = x), a vertical span in logical space is a
+// contiguous horizontal byte range in row `py = x` of `g_fb`!
 void fillSpanY(int16_t x, int16_t y0, int16_t y1, Color color) {
   if (!g_fb || color == Color::Transparent) return;
   if (x < 0 || x >= kScreenW) return;
@@ -48,11 +56,27 @@ void fillSpanY(int16_t x, int16_t y0, int16_t y1, Color color) {
   if (y1 > kScreenH) y1 = kScreenH;
   if (y0 >= y1) return;
 
-  uint8_t* const row = g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb;
-  const int16_t b0 = static_cast<int16_t>(y0 >> 3);
-  const int16_t b1 = static_cast<int16_t>((y1 - 1) >> 3);
-  const uint8_t m0 = static_cast<uint8_t>(0xFFu >> (y0 & 7));
-  const uint8_t m1 = static_cast<uint8_t>(0xFFu << (7 - ((y1 - 1) & 7)));
+  uint8_t* row = nullptr;
+  int16_t b0 = 0;
+  int16_t b1 = 0;
+  uint8_t m0 = 0;
+  uint8_t m1 = 0;
+
+  if (g_orientation == freeink::ui::Orientation::PortraitInverted) {
+    row = g_fb + static_cast<int32_t>(x) * g_pwb;
+    const int16_t px0 = static_cast<int16_t>((g_pw - 1) - (y1 - 1));
+    const int16_t px1 = static_cast<int16_t>((g_pw - 1) - y0);
+    b0 = static_cast<int16_t>(px0 >> 3);
+    b1 = static_cast<int16_t>(px1 >> 3);
+    m0 = static_cast<uint8_t>(0xFFu >> (px0 & 7));
+    m1 = static_cast<uint8_t>(0xFFu << (7 - (px1 & 7)));
+  } else {
+    row = g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb;
+    b0 = static_cast<int16_t>(y0 >> 3);
+    b1 = static_cast<int16_t>((y1 - 1) >> 3);
+    m0 = static_cast<uint8_t>(0xFFu >> (y0 & 7));
+    m1 = static_cast<uint8_t>(0xFFu << (7 - ((y1 - 1) & 7)));
+  }
 
   if (color == Color::Black) {
     if (b0 == b1) {
@@ -71,7 +95,8 @@ void fillSpanY(int16_t x, int16_t y0, int16_t y1, Color color) {
       row[b1] = static_cast<uint8_t>(row[b1] | m1);
     }
   } else {
-    const uint8_t ink = ditherInkMask(x, color == Color::DarkGray ? 12 : 4);
+    const uint8_t ink = ditherInkMask(x, color == Color::DarkGray ? 12 : 4,
+                                      g_orientation == freeink::ui::Orientation::PortraitInverted);
     if (ink == 0) return;
     if (b0 == b1) {
       row[b0] = static_cast<uint8_t>(row[b0] & ~(m0 & m1 & ink));
@@ -227,6 +252,14 @@ void bindFramebuffer(uint8_t* fb, int16_t panelWidth, int16_t panelHeight, int16
   g_pwb = panelWidthBytes;
 }
 
+void setCanvasOrientation(freeink::ui::Orientation orient) {
+  g_orientation = orient;
+}
+
+freeink::ui::Orientation canvasOrientation() {
+  return g_orientation;
+}
+
 void clearScreen() {
   if (!g_fb) return;
   memset(g_fb, 0xFF, static_cast<size_t>(g_pwb) * g_ph);
@@ -320,12 +353,15 @@ void fillDotGrid(DrawTarget& t, Rect r, int16_t step, Color dotColor) {
   if (g_fb && dotColor == Color::Black) {
     const int16_t xEnd = static_cast<int16_t>(r.right() - 1);
     const int16_t yEnd = static_cast<int16_t>(r.bottom() - 1);
+    const bool inverted = (g_orientation == freeink::ui::Orientation::PortraitInverted);
     for (int16_t x = static_cast<int16_t>(r.x + 2); x < xEnd; x = static_cast<int16_t>(x + step)) {
       if (x < 0 || x >= kScreenW) continue;
-      uint8_t* const row = g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb;
+      uint8_t* const row = inverted ? (g_fb + static_cast<int32_t>(x) * g_pwb)
+                                    : (g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb);
       for (int16_t y = static_cast<int16_t>(r.y + 2); y < yEnd; y = static_cast<int16_t>(y + step)) {
         if (y >= 0 && y < kScreenH) {
-          row[y >> 3] = static_cast<uint8_t>(row[y >> 3] & ~(0x80u >> (y & 7)));
+          const int16_t px = inverted ? static_cast<int16_t>((g_pw - 1) - y) : y;
+          row[px >> 3] = static_cast<uint8_t>(row[px >> 3] & ~(0x80u >> (px & 7)));
         }
       }
     }
