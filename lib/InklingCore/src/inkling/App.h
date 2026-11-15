@@ -7,11 +7,14 @@
 #include "inkling/Platform.h"
 #include "inkling/Screens.h"
 #include "inkling/desk/DeskDashboard.h"
+#include "inkling/dict/Dictionary.h"
 #include "inkling/oracle/OracleDeck.h"
 #include "inkling/reader/BookReader.h"
 #include "inkling/reader/Library.h"
 #include "inkling/rpg/TextRpgEngine.h"
 #include "inkling/settings/InklingSettings.h"
+#include "inkling/stats/ReadingStats.h"
+#include "inkling/study/Flashcards.h"
 #include "inkling/ui/CyberCanvas.h"
 
 namespace inkling {
@@ -39,6 +42,12 @@ class InklingApp {
     Toc,
     Diagnostic,
     Message,
+    Marks,       // bookmarks and highlights of the open book
+    Select,      // word cursor on the page: clip a passage / look a word up
+    Links,       // link cursor on the page: footnotes, cross-references
+    Definition,  // a dictionary entry
+    Flashcards,
+    Stats,
   };
 
   using PresentFn = void (*)(freeink::ui::RefreshHint hint, void* user);
@@ -68,6 +77,8 @@ class InklingApp {
   void showTextRpg();
   // fromReader: opened from the reader menu, so Back returns there.
   void showSettings(bool fromReader = false);
+  void showFlashcards();
+  void showStats();
   void onButton(Button button);
   void onImuSample(float ax, float ay, float az);
 
@@ -96,6 +107,10 @@ class InklingApp {
   const TextRpgEngine& rpg() const { return rpg_; }
   const Library& library() const { return library_; }
   const DeviceStatus& status() const { return status_; }
+  const ReadingStats& stats() const { return stats_; }
+  // The next picture of /sleep (or a sleep*.bmp in the card root) for the
+  // lock screen, advancing the rotation. False when there is none.
+  bool nextSleepImage(char* path, uint32_t cap);
   BookReader* reader() const { return reader_; }
   const InklingSettings& settings() const { return settings_; }
   InklingSettings& settings() { return settings_; }
@@ -132,6 +147,12 @@ class InklingApp {
   static void readerScreen(UiApp::ScreenType& screen, void* user);
   static void readerMenuScreen(UiApp::ScreenType& screen, void* user);
   static void tocScreen(UiApp::ScreenType& screen, void* user);
+  static void marksScreen(UiApp::ScreenType& screen, void* user);
+  static void selectScreen(UiApp::ScreenType& screen, void* user);
+  static void linksScreen(UiApp::ScreenType& screen, void* user);
+  static void definitionScreen(UiApp::ScreenType& screen, void* user);
+  static void flashcardsScreen(UiApp::ScreenType& screen, void* user);
+  static void statsScreen(UiApp::ScreenType& screen, void* user);
 
  private:
   struct Menu {
@@ -168,6 +189,23 @@ class InklingApp {
   void applyOrientation();
   int homeDockColumns() const;
 
+  // Reader tools (AppTools.cpp).
+  enum class SelectPurpose : uint8_t { Clip, Lookup };
+  void drawReaderPage(freeink::ui::DrawTarget& t);
+  void drawReaderBar(freeink::ui::DrawTarget& t, const char* hint);
+  void toggleBookmark();
+  void showMarks();
+  void enterSelect(SelectPurpose purpose);
+  void leaveSelect();
+  void moveSelection(Button button);
+  void confirmSelection();
+  void saveClipping(uint16_t first, uint16_t last);
+  void lookUpWord(uint16_t word);
+  void enterLinks();
+  void followSelectedLink();
+  void onToolButton(Button button);
+  int32_t today() const;
+
   Storage& storage_;
   BookReader* reader_;
   DeviceStatus& status_;
@@ -188,14 +226,44 @@ class InklingApp {
   DeskDashboard desk_;
   OracleDeck oracle_;
   TextRpgEngine rpg_;
-  Menu homeDock_, libraryMenu_, readerMenu_, tocMenu_, settingsMenu_;
+  Menu homeDock_, libraryMenu_, readerMenu_, tocMenu_, settingsMenu_, marksMenu_, deckMenu_;
+  BookMarks marks_;
+  ReadingStats stats_;
+  Dictionary dictionary_;
+  Flashcards cards_;
   char lastBookPath_[128] = {};
   char message_[96] = {};
   freeink::book::BookStatus lastRenderStatus_ = freeink::book::BookStatus::Ok;
-  uint32_t totalPagesRead_ = 0;
-  int32_t lastReadDay_ = 0;
-  uint16_t dailyPages_ = 0;
-  uint16_t streakDays_ = 0;
+  uint32_t lastTurnMs_ = 0;  // when the page on screen was turned to (0 = unknown)
+
+  // Word cursor (Mode::Select). The boxes are allocated while it is in use.
+  BookReader::PageWord* selWords_ = nullptr;
+  uint16_t selCount_ = 0;
+  uint16_t selCursor_ = 0;
+  uint16_t selAnchor_ = 0xFFFF;  // first word of a passage being clipped
+  uint16_t selDrawnLo_ = 0, selDrawnHi_ = 0;
+  bool selDrawn_ = false;
+  SelectPurpose selPurpose_ = SelectPurpose::Clip;
+
+  // Link cursor (Mode::Links) and the way back from a followed link.
+  BookReader::PageLinkBox linkBoxes_[24];
+  uint16_t linkBoxCount_ = 0;
+  uint8_t linkCount_ = 0;
+  uint8_t linkSel_ = 0;
+  bool linkDrawn_ = false;
+  bool hasLinkReturn_ = false;
+  uint8_t turnsSinceLink_ = 0;
+  ReadingPosition linkReturn_;
+
+  // Dictionary entry on screen (Mode::Definition); the text is allocated.
+  char* definition_ = nullptr;
+  char definitionHead_[64] = {};
+  Dictionary::Result definitionResult_ = Dictionary::Result::NotFound;
+  int definitionLine_ = 0;
+  int definitionLines_ = 0;
+  int definitionFit_ = 1;
+
+  const char* readerNotice_ = nullptr;  // shown once in the reader's status bar
   float prevAx_ = 0.0f;
   float prevAy_ = 0.0f;
   float prevAz_ = 1.0f;
@@ -210,6 +278,9 @@ class InklingApp {
   bool layoutDirty_ = false;
   bool resumePending_ = false;
   bool cursorOnlyRedraw_ = false;
+  // A screen was just entered (or rotated) and has not been drawn whole yet:
+  // keys that arrive before that frame must not turn it into a partial one.
+  bool fullDrawPending_ = false;
   bool needsReaderBackdrop_ = false;
   bool progressDirty_ = false;  // page shown but position not yet on the card
   bool statsDirty_ = false;

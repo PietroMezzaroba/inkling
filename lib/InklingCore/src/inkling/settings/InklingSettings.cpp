@@ -125,6 +125,19 @@ void InklingSettings::cycleAutoSleep(int delta) {
   autoSleep = static_cast<AutoSleepOption>(cur);
 }
 
+const char* InklingSettings::sleepScreenLabel() const {
+  switch (sleepScreen) {
+    case SleepScreenMode::Images: return "Immagini da /sleep";
+    case SleepScreenMode::Poster: return "Poster";
+    default:                      return "Copertina del libro";
+  }
+}
+
+void InklingSettings::cycleSleepScreen(int delta) {
+  const int count = static_cast<int>(SleepScreenMode::Count);
+  sleepScreen = static_cast<SleepScreenMode>((static_cast<int>(sleepScreen) + delta + count) % count);
+}
+
 void InklingSettings::cycleWakeSensitivity(int delta) {
   const int count = static_cast<int>(WakeSensitivity::Count);
   int cur = static_cast<int>(wakeSensitivity);
@@ -166,6 +179,7 @@ bool InklingSettings::load(Storage& storage) {
   if (bytes(&s.deskWidget) >= static_cast<uint8_t>(DeskWidgetType::Count)) s.deskWidget = def.deskWidget;
   if (bytes(&s.invertKeysOn180) > 1) s.invertKeysOn180 = def.invertKeysOn180;
   if (bytes(&s.nightMode) > 1) s.nightMode = def.nightMode;
+  if (bytes(&s.sleepScreen) >= static_cast<uint8_t>(SleepScreenMode::Count)) s.sleepScreen = def.sleepScreen;
   *this = s;
   return true;
 }

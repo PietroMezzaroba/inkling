@@ -202,6 +202,15 @@ void sleepScreen(UiApp::ScreenType& screen, void* user) {
   auto* app = static_cast<InklingApp*>(user);
 
   clearScreen();
+  // "Immagini": a picture from the card fills the panel, nothing over it.
+  if (app && app->reader() && app->settings().sleepScreen == SleepScreenMode::Images) {
+    char image[128];
+    if (app->nextSleepImage(image, sizeof(image)) && app->reader()->drawImageFile(t, image, Rect{0, 0, w, h})) {
+      return;
+    }
+    clearScreen();  // no picture, or one that does not decode: the usual screen
+  }
+  const bool showCover = !app || app->settings().sleepScreen != SleepScreenMode::Poster;
   const Rect outer{10, 10, static_cast<int16_t>(w - 20), static_cast<int16_t>(h - 20)};
   drawCard(t, outer, 12, 4, false, true);
 
@@ -233,7 +242,7 @@ void sleepScreen(UiApp::ScreenType& screen, void* user) {
     fastStroke(t, artBox, Paint::solid(Color::Black), 2, 10);
 
     bool drewCover = false;
-    if (hasBook && app->reader()) {
+    if (showCover && hasBook && app->reader()) {
       drewCover = app->reader()->drawCoverInBox(t, app->library().at(idx).path, artBox);
     }
     if (!drewCover) {
@@ -274,7 +283,7 @@ void sleepScreen(UiApp::ScreenType& screen, void* user) {
     fastStroke(t, artBox, Paint::solid(Color::Black), 2, 10);
 
     bool drewCover = false;
-    if (hasBook && app->reader()) {
+    if (showCover && hasBook && app->reader()) {
       drewCover = app->reader()->drawCoverInBox(t, app->library().at(idx).path, artBox);
     }
     if (!drewCover) {

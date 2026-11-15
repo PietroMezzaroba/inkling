@@ -120,7 +120,7 @@ struct Recorder {
   static void present(freeink::ui::RefreshHint, void* user) {
     auto& self = *static_cast<Recorder*>(user);
     char name[160];
-    snprintf(name, sizeof(name), "%s/%02d-%s.png", self.outDir.c_str(), self.frame++, self.label.c_str());
+    snprintf(name, sizeof(name), "%s/%03d-%s.png", self.outDir.c_str(), self.frame++, self.label.c_str());
     if (self.canvas->save(name)) std::printf("%s\n", name);
   }
 };
@@ -239,15 +239,15 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
     step("toc-down", B::Down);
     step("toc-jump", B::Confirm);
     step("menu2", B::Confirm);
-    press(B::Down, 2);
+    press(B::Down, 6);
     step("menu-fontsize", B::Right);
     step("apply", B::Back);
     step("menu3", B::Confirm);
-    press(B::Down, 7);
+    press(B::Down, 11);
     step("menu-night", B::Right);
     step("night-page", B::Back);
     app.onButton(B::Confirm);
-    press(B::Down, 7);
+    press(B::Down, 11);
     app.onButton(B::Right);
     app.onButton(B::Back);
     app.showSettings();
@@ -451,15 +451,348 @@ int runWalk(const std::string& cardDir, int mode, int maxSpine, int family) {
   return 0;
 }
 
+// Scripted tour of the reader tools and the Home apps that came with them:
+// bookmark, clipping, dictionary, footnote links, flashcards, statistics, a
+// picture as lock screen. One PNG per frame, like runTour().
+int runTools(const std::string& cardDir, const std::string& outDir, const std::string& bookMatch) {
+  Fonts fonts;
+  sim::HostStorage storage(cardDir);
+  storage.writeFile("/.inkling/last.txt", "", 0);
+  storage.writeFile("/.inkling/prefs.bin", "", 0);
+  storage.writeFile("/.inkling/settings.bin", "", 0);
+
+  inkling::BookReader reader(storage, readerMemory);
+  reader.setIndexBuffer(readerIndex, sizeof(readerIndex));
+  fonts.registerAll(reader, glyphsRegular, sizeof(glyphsRegular), glyphsItalic, sizeof(glyphsItalic));
+  Canvas canvas;
+  inkling::ui::bindInklingFonts(canvas.target);
+  reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());
+  static inkling::UiGlyphFallback uiFallback;
+  uiFallback.setFont(&reader.regularFont());
+  canvas.target.setGlyphFallback(&uiFallback);
+  inkling::DeviceStatus status;
+  populateSimStatus(status);
+  inkling::UiApp ui(canvas.target, canvas.target.deviceContext());
+  inkling::InklingApp app(storage, &reader, status, ui, frameFor(canvas));
+  Recorder rec{&canvas, outDir, "", 0};
+  app.setPresenter(Recorder::present, &rec);
+  SimRotator rotator{&canvas, &ui, &app};
+  app.setOrientationHandler(SimRotator::rotate, &rotator);
+
+  using B = inkling::Button;
+  auto step = [&](const char* label, B button) {
+    rec.label = label;
+    status.uptimeMs += 40000;
+    app.onButton(button);
+    app.update();
+    while (app.hasIdleWork(5000) && app.idleTick(5000)) {
+    }
+  };
+  auto shot = [&](const char* label) {
+    rec.label = label;
+    app.update();
+  };
+  auto press = [&](B button, int times) {
+    for (int i = 0; i < times; ++i) {
+      status.uptimeMs += 40000;
+      app.onButton(button);
+      app.update();
+    }
+  };
+  // Reader menu item `index`, from the page.
+  auto menuItem = [&](int index) {
+    rec.label = "menu";
+    app.onButton(B::Confirm);
+    for (int i = 0; i < index; ++i) app.onButton(B::Down);
+    app.update();
+  };
+
+  rec.label = "home";
+  app.begin();
+  app.update();
+
+  // Open the book whose name contains `bookMatch`, a few chapters in.
+  int book = 0;
+  for (int i = 0; i < app.library().count(); ++i) {
+    if (std::string(app.library().at(i).name).find(bookMatch) != std::string::npos) book = i;
+  }
+  auto openBook = [&](const char* label) {
+    app.showLibrary();  // the cursor starts on the active book
+    app.update();
+    const int from = app.activeBookIndex() < 0 ? 0 : app.activeBookIndex();
+    press(book >= from ? B::Down : B::Up, book >= from ? book - from : from - book);
+    step(label, B::Confirm);
+  };
+  openBook("reader");
+  // To a page of running prose, wherever the chapters start.
+  rec.label = "seek";
+  for (int tries = 0; tries < 60; ++tries) {
+    static inkling::BookReader::PageWord many[inkling::BookReader::kMaxPageWords];
+    if (reader.pageWords(many, inkling::BookReader::kMaxPageWords) > 60) break;
+    app.onButton(B::Down);
+    app.update();
+  }
+  press(B::Down, 2);
+  shot("reader-prose");
+
+  // Bookmark the page, then see it in the menu and on the page.
+  menuItem(2);
+  step("bookmark-set", B::Confirm);
+  step("bookmark-page", B::Back);
+
+  // Clip a passage: start at the 4th word, end two lines further.
+  menuItem(3);
+  step("clip-start", B::Confirm);
+  press(B::Right, 3);
+  step("clip-anchor", B::Confirm);
+  press(B::Right, 9);
+  press(B::Down, 2);
+  shot("clip-range");
+  step("clip-saved", B::Confirm);
+
+  // The same passage after a relayout (bigger type): still underlined.
+  menuItem(6);
+  app.onButton(B::Right);
+  step("clip-relayout", B::Back);
+  menuItem(6);
+  app.onButton(B::Left);
+  step("clip-back", B::Back);
+
+  // The list of marks.
+  menuItem(2);
+  step("marks", B::Right);
+  step("marks-down", B::Down);
+  step("marks-jump", B::Confirm);
+
+  // Dictionary: a few words in a row.
+  menuItem(4);
+  step("dict-cursor", B::Confirm);
+  for (int i = 0; i < 6; ++i) {
+    step(("dict-word-" + std::to_string(i)).c_str(), B::Confirm);
+    step("dict-back", B::Back);
+    press(B::Right, 2 + i);
+  }
+  step("dict-exit", B::Back);
+
+  // Footnotes / links: the first page that has one.
+  rec.label = "seek-link";
+  for (int tries = 0; tries < 300; ++tries) {
+    uint8_t links = 0;
+    reader.pageLinks(nullptr, 0, &links);
+    if (links > 0) break;
+    app.onButton(B::Down);
+    app.update();
+  }
+  shot("links-page");
+  menuItem(5);
+  shot("links-menu");
+  step("links-cursor", B::Confirm);
+  step("links-next", B::Down);
+  step("links-followed", B::Confirm);
+  step("links-next-page", B::Down);
+  step("links-returned", B::Back);
+
+  // Close the book; Home apps.
+  step("closed", B::Back);
+  app.showHome();
+  shot("home-8");
+  app.showFlashcards();
+  shot("cards-decks");
+  step("cards-front", B::Confirm);
+  step("cards-back", B::Confirm);
+  step("cards-good", B::Confirm);
+  step("cards-back2", B::Confirm);
+  step("cards-again", B::Left);
+  for (int i = 0; i < 40; ++i) {
+    app.onButton(B::Confirm);
+    app.onButton(B::Right);
+  }
+  shot("cards-summary");
+  step("cards-decks2", B::Confirm);
+  step("cards-nothing-due", B::Confirm);
+  app.showStats();
+  shot("stats");
+
+  // A picture as lock screen.
+  app.settings().sleepScreen = inkling::SleepScreenMode::Images;
+  rec.label = "lock-image";
+  ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+  app.update();
+  app.settings().sleepScreen = inkling::SleepScreenMode::Poster;
+  rec.label = "lock-poster";
+  ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+  app.update();
+  app.settings().sleepScreen = inkling::SleepScreenMode::Cover;
+
+  // The same in landscape.
+  app.settings().rotationMode = inkling::RotationMode::LockLandscapeL;
+  app.setDesiredOrientation(freeink::ui::Orientation::LandscapeClockwise);
+  app.showHome();
+  shot("land-home-8");
+  app.showStats();
+  shot("land-stats");
+  app.showFlashcards();
+  shot("land-cards-decks");
+  openBook("land-reader");
+  menuItem(3);
+  step("land-clip", B::Confirm);
+  press(B::Right, 5);
+  app.onButton(B::Confirm);
+  press(B::Down, 2);
+  shot("land-clip-range");
+  step("land-clip-cancel", B::Back);
+  step("land-clip-exit", B::Back);
+  menuItem(2);
+  step("land-marks", B::Right);
+  step("land-menu", B::Back);
+  step("land-reader2", B::Back);
+  menuItem(4);
+  step("land-dict", B::Confirm);
+  press(B::Right, 3);
+  step("land-dict-word", B::Confirm);
+  app.settings().sleepScreen = inkling::SleepScreenMode::Images;
+  rec.label = "land-lock-image";
+  ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+  app.update();
+
+  app.shutdown();
+  return 0;
+}
+
+// Checks of the parts with no screen: dictionary lookups, flashcard
+// scheduling over several days, reading statistics across days.
+int runSelfTest(const std::string& cardDir) {
+  sim::HostStorage storage(cardDir);
+  int failures = 0;
+  auto expect = [&](bool ok, const char* what) {
+    std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
+    if (!ok) ++failures;
+  };
+
+  // --- dictionary -----------------------------------------------------------
+  {
+    inkling::Dictionary dict;
+    using R = inkling::Dictionary::Result;
+    char head[64], def[600];
+    auto look = [&](const char* word) { return dict.lookup(storage, word, head, sizeof(head), def, sizeof(def)); };
+    expect(dict.open(storage) == R::Found, "dictionary found in a sub-folder of /dizionari");
+    expect(look("aria") == R::Found && std::string(head) == "aria", "exact word");
+    expect(std::string(def).find("<") == std::string::npos && std::string(def).find("Miscuglio") != std::string::npos,
+           "markup removed from the definition");
+    expect(look("Montagna,") == R::Found && std::string(head) == "montagna", "capital letter and punctuation");
+    expect(look("dell\xE2\x80\x99" "aria") == R::Found && std::string(head) == "aria", "elision with a curly apostrophe");
+    expect(look("\xC2\xAB" "vetta" "\xC2\xBB") == R::Found, "guillemets around the word");
+    expect(look("everest") == R::Found && std::string(head) == "Everest", "headword with a capital");
+    expect(std::string(def).find("pi\xC3\xB9" " alta") != std::string::npos, "named entity decoded");
+    expect(look("montagne") == R::Nearest && std::string(head) == "montagna", "inflected form: nearest headword");
+    expect(look("spedizioni") == R::Nearest && std::string(head) == "spedizione", "plural: nearest headword");
+    expect(look("xilofono") == R::NotFound, "missing word");
+    expect(look("zz0777") == R::Found && std::string(def) == "voce di riempimento 777", "word deep in the index");
+    expect(look("zz1499") == R::Found, "last word of the index");
+    expect(look("a") == R::NotFound, "before the first headword");
+    inkling::Dictionary again;  // a second run reuses the side index
+    expect(again.lookup(storage, "tempo", head, sizeof(head), def, sizeof(def)) == R::Found, "side index reused");
+  }
+
+  // --- flashcards -----------------------------------------------------------
+  {
+    using G = inkling::Flashcards::Grade;
+    const int32_t day = 20000;
+    inkling::Flashcards cards;
+    cards.scan(storage);
+    int deck = -1;
+    for (int i = 0; i < cards.deckCount(); ++i) {
+      if (std::string(cards.deck(i).name) == "Inglese") deck = i;
+    }
+    expect(deck >= 0, "semicolon deck listed");
+    expect(cards.begin(storage, deck, day) && cards.deckCards() == 5 && cards.remaining() == 5, "five new cards");
+    expect(std::string(cards.front()) == "mountain" && std::string(cards.back()) == "montagna", "first card");
+    cards.grade(storage, G::Good);  // mountain: tomorrow
+    cards.grade(storage, G::Easy);  // summit: in three days
+    cards.grade(storage, G::Again); // rope: again this session
+    expect(cards.remaining() == 3 && std::string(cards.front()) == "ice axe", "forgotten card goes to the end");
+    cards.grade(storage, G::Good);  // ice axe
+    expect(std::string(cards.front()) == "crampons; plural", "quoted field keeps its separator");
+    cards.grade(storage, G::Good);  // crampons
+    expect(std::string(cards.front()) == "rope" && cards.remaining() == 1, "forgotten card comes back");
+    cards.grade(storage, G::Good);
+    expect(cards.finished() && cards.reviewed() == 5, "session finished");
+    cards.end();
+    expect(cards.begin(storage, deck, day) && cards.finished(), "same day: nothing due");
+    cards.end();
+    expect(cards.begin(storage, deck, day + 1) && cards.remaining() == 4, "next day: the four 'good' cards");
+    while (!cards.finished()) cards.grade(storage, G::Good);
+    cards.end();
+    expect(cards.begin(storage, deck, day + 3) && cards.remaining() == 1 && std::string(cards.front()) == "summit",
+           "third day: the 'easy' card");
+    cards.grade(storage, G::Good);
+    cards.end();
+    expect(cards.begin(storage, deck, day + 7) && cards.remaining() == 4, "sixth day after: the four again");
+    cards.end();
+
+    int crosspet = -1;
+    for (int i = 0; i < cards.deckCount(); ++i) {
+      if (std::string(cards.deck(i).name) == "Prova CrossPet") crosspet = i;
+    }
+    expect(crosspet >= 0 && cards.begin(storage, crosspet, day) && cards.deckCards() == 4, "CrossPet deck, header skipped");
+    expect(std::string(cards.front()) == "What is 2+2?" && std::string(cards.back()) == "4", "id column ignored");
+    cards.grade(storage, G::Good);
+    expect(std::string(cards.front()) == "Bonjour  greeting" || std::string(cards.front()) == "Bonjour greeting",
+           "hint marks removed");
+    cards.grade(storage, G::Good);
+    expect(std::string(cards.back()).find('\n') != std::string::npos, "/n becomes a line break");
+    cards.end();
+  }
+
+  // --- reading statistics ---------------------------------------------------
+  {
+    storage.removeFile("/.inkling/reading.bin");
+    inkling::ReadingStats stats;
+    auto at = [](uint8_t dayOfMonth) {
+      inkling::LocalTime t;
+      t.valid = true;
+      t.year = 2026;
+      t.month = 11;
+      t.day = dayOfMonth;
+      t.hour = 21;
+      return t;
+    };
+    for (int i = 0; i < 10; ++i) stats.onPage(at(10), 60);
+    for (int i = 0; i < 4; ++i) stats.onPage(at(11), 90);
+    expect(stats.todayPages(at(11)) == 4 && stats.todayMinutes(at(11)) == 6 && stats.streakDays(at(11)) == 2,
+           "second day in a row");
+    expect(stats.todayPages(at(12)) == 0 && stats.streakDays(at(12)) == 2, "next morning: nothing yet, streak alive");
+    expect(stats.streakDays(at(13)) == 0, "a day skipped: streak over");
+    stats.save(storage);
+    inkling::ReadingStats loaded;
+    loaded.load(storage);
+    for (int i = 0; i < 7; ++i) loaded.onPage(at(14), 30);
+    inkling::ReadingStats::Day week[7];
+    loaded.lastWeek(at(15), week);
+    expect(week[6].pages == 0 && week[5].pages == 7 && week[2].pages == 4 && week[1].pages == 10 && week[1].minutes == 10,
+           "last week, day by day");
+    expect(loaded.totalPages() == 21 && loaded.totalMinutes() == 19 && loaded.streakDays(at(14)) == 1, "totals");
+    storage.removeFile("/.inkling/reading.bin");
+  }
+
+  std::printf("%s\n", failures ? "SELF-TEST FAILED" : "self-test passed");
+  return failures ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[1]) == "--selftest") return runSelfTest(argv[2]);
+  if (argc >= 4 && std::string(argv[1]) == "--tools") return runTools(argv[2], argv[3], argc >= 5 ? argv[4] : "");
   if (argc >= 4 && std::string(argv[1]) == "--walk") {
     return runWalk(argv[2], std::atoi(argv[3]), argc >= 5 ? std::atoi(argv[4]) : 14,
                    argc >= 6 ? std::atoi(argv[5]) : 0);
   }
   if (argc == 3 && std::string(argv[1]) == "--check") return runCheck(argv[2]);
   if (argc == 3) return runTour(argv[1], argv[2]);
-  std::fprintf(stderr, "usage: %s <card-dir> <out-dir> | --check <card-dir>\n", argv[0]);
+  std::fprintf(stderr,
+               "usage: %s <card-dir> <out-dir> | --check <card-dir> | --walk <card-dir> <mode> [spines] [family]"
+               " | --tools <card-dir> <out-dir> [book]\n",
+               argv[0]);
   return 2;
 }

@@ -590,6 +590,7 @@ void setup() {
 }
 
 void loop() {
+  status.uptimeMs = millis();
   // Sample ADC button ladder at ~500 Hz while active or refreshing so rapid
   // clicks are never missed.
   input.update();
@@ -671,6 +672,7 @@ void loop() {
   const unsigned long autoSleepTimeoutMs = app->settings().autoSleepTimeoutMs();
   const bool isDeskClockOnUsb = (app->mode() == inkling::InklingApp::Mode::DeskAmbient) && status.charging;
   if (!isDeskClockOnUsb && autoSleepTimeoutMs != 0xFFFFFFFFUL && (millis() - lastActivityMs >= autoSleepTimeoutMs)) {
+    cpuFull();
     LOG("inactivity timeout (%lu ms): entering auto-sleep", autoSleepTimeoutMs);
     powerOff();
   }

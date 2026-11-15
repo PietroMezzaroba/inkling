@@ -30,7 +30,9 @@ bool hasBookExtension(const char* name) {
 bool isSystemFolder(const char* name) {
   static const char* const kSkip[] = {"Android", "DCIM", "LOST.DIR", "System Volume Information", "Music",
                                       "Pictures", "Movies", "Ringtones", "Alarms", "Notifications", "Podcasts",
-                                      "Recordings", "Audiobooks", "screenshots"};
+                                      "Recordings", "Audiobooks", "screenshots",
+                                      // Inkling's own folders: clippings, decks, dictionaries, lock pictures.
+                                      "Ritagli", "flashcards", "dizionari", "dict", "dictionaries", "sleep"};
   if (name[0] == '.') return true;
   for (const char* skip : kSkip) {
     if (strcmp(name, skip) == 0) return true;
@@ -138,6 +140,20 @@ void Library::onEntry(const char* name, bool isDir, void* user) {
   if (!hasBookExtension(name) || self.count_ >= kMaxBooks) return;
   // Skip diagnostic crash reports dumped on the SD root by legacy firmware.
   if (strcmp(name, "crash_report.txt") == 0) return;
+  // A flashcard deck sent through the Wi-Fi portal as a text file is not a book.
+  {
+    static const char kDeckSuffix[] = ".flashcards.txt";
+    const size_t n = strlen(name), m = sizeof(kDeckSuffix) - 1;
+    if (n > m) {
+      bool deck = true;
+      for (size_t i = 0; i < m && deck; ++i) {
+        char c = name[n - m + i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        deck = c == kDeckSuffix[i];
+      }
+      if (deck) return;
+    }
+  }
 
   Entry& e = self.entries_[self.count_];
   memset(&e, 0, sizeof(e));

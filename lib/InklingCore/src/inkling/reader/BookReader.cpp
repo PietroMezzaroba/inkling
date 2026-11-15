@@ -979,4 +979,175 @@ bool BookReader::drawCoverInBox(freeink::ui::DrawTarget& t, const char* bookPath
   return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Standalone image files (lock-screen pictures)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Atkinson-dithers grayscale rows straight onto the target, up to 800 px wide.
+struct WideTargetSink {
+  freeink::ui::DrawTarget* target;
+  int16_t baseX;
+  int16_t baseY;
+  int16_t* err0;
+  int16_t* err1;
+  int16_t* err2;
+  uint16_t maxW;
+
+  static bool onRow(void* user, uint16_t y, const uint8_t* gray, uint16_t width) {
+    auto* self = static_cast<WideTargetSink*>(user);
+    if (width > self->maxW) width = self->maxW;
+    uint8_t rowBits[100] = {};
+    if (width > sizeof(rowBits) * 8) width = sizeof(rowBits) * 8;
+    freeink::book::ditherRowAtkinson(gray, width, self->err0, self->err1, self->err2, rowBits);
+    freeink::ui::BitmapRef ref{};
+    ref.data = rowBits;
+    ref.width = width;
+    ref.height = 1;
+    ref.format = freeink::ui::BitmapFormat::BW1;
+    self->target->bitmap(
+        freeink::ui::Rect{self->baseX, static_cast<int16_t>(self->baseY + y), static_cast<int16_t>(width), 1},
+        ref, freeink::ui::BitmapMode::Center, freeink::ui::Paint::solid(freeink::ui::Color::Black));
+    return true;
+  }
+};
+
+uint32_t le32(const uint8_t* p) {
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+uint16_t le16(const uint8_t* p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
+
+}  // namespace
+
+bool BookReader::drawImageFile(freeink::ui::DrawTarget& t, const char* path, freeink::ui::Rect box) {
+  if (open_ || !path || !path[0] || box.width < 16 || box.height < 16) return false;
+  const uint16_t maxW = static_cast<uint16_t>(box.width > 800 ? 800 : box.width);
+  const uint16_t maxH = static_cast<uint16_t>(box.height);
+  scratch_.reset();
+  bool ok = false;
+
+  if (endsWithNoCase(path, ".bmp")) {
+    // Uncompressed BMP, 1/8/24/32 bits per pixel, either row order.
+    uint8_t head[54];
+    if (storage_.readFileAt(path, 0, head, sizeof(head)) != static_cast<int32_t>(sizeof(head)) || head[0] != 'B' ||
+        head[1] != 'M') {
+      return false;
+    }
+    const uint32_t dataOffset = le32(head + 10);
+    const uint32_t dibSize = le32(head + 14);
+    const int32_t srcW = static_cast<int32_t>(le32(head + 18));
+    const int32_t rawH = static_cast<int32_t>(le32(head + 22));
+    const uint16_t bpp = le16(head + 28);
+    const uint32_t compression = le32(head + 30);
+    const int32_t srcH = rawH < 0 ? -rawH : rawH;
+    const bool bottomUp = rawH > 0;
+    if (srcW <= 0 || srcH <= 0 || srcW > 2000 || srcH > 4000) return false;
+    if (!(bpp == 1 || bpp == 8 || bpp == 24 || bpp == 32) || (compression != 0 && compression != 3)) return false;
+
+    int32_t outW = srcW, outH = srcH;
+    if (outW > maxW) {
+      outH = outH * maxW / outW;
+      outW = maxW;
+    }
+    if (outH > maxH) {
+      outW = outW * maxH / outH;
+      outH = maxH;
+    }
+    if (outW < 1 || outH < 1) return false;
+
+    const uint32_t rowBytes = ((static_cast<uint32_t>(srcW) * bpp + 31u) / 32u) * 4u;
+    uint8_t* row = scratch_.allocArray<uint8_t>(rowBytes);
+    uint8_t* gray = scratch_.allocArray<uint8_t>(static_cast<size_t>(outW));
+    uint8_t* palette = bpp <= 8 ? scratch_.allocArray<uint8_t>(256) : nullptr;  // gray per index
+    const size_t errCap = static_cast<size_t>(outW) + 4u;
+    int16_t* err0 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err1 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err2 = scratch_.allocArray<int16_t>(errCap);
+    if (row && gray && err0 && err1 && err2 && (bpp > 8 || palette)) {
+      memset(err0, 0, errCap * sizeof(int16_t));
+      memset(err1, 0, errCap * sizeof(int16_t));
+      memset(err2, 0, errCap * sizeof(int16_t));
+      if (palette) {
+        const uint32_t entries = bpp == 1 ? 2u : 256u;
+        uint8_t bgra[4];
+        for (uint32_t i = 0; i < entries; ++i) {
+          palette[i] = static_cast<uint8_t>(i * 255u / (entries - 1));
+          if (storage_.readFileAt(path, 14 + dibSize + i * 4, bgra, 4) == 4) {
+            palette[i] = static_cast<uint8_t>((bgra[2] * 77u + bgra[1] * 150u + bgra[0] * 29u) >> 8);
+          }
+        }
+      }
+      WideTargetSink sink{&t,
+                          static_cast<int16_t>(box.x + (box.width - outW) / 2),
+                          static_cast<int16_t>(box.y + (box.height - outH) / 2),
+                          err0,
+                          err1,
+                          err2,
+                          static_cast<uint16_t>(outW)};
+      ok = true;
+      for (int32_t oy = 0; oy < outH && ok; ++oy) {
+        const int32_t sy = oy * srcH / outH;
+        const uint32_t fileRow = static_cast<uint32_t>(bottomUp ? srcH - 1 - sy : sy);
+        if (storage_.readFileAt(path, dataOffset + fileRow * rowBytes, row, rowBytes) !=
+            static_cast<int32_t>(rowBytes)) {
+          ok = false;
+          break;
+        }
+        for (int32_t ox = 0; ox < outW; ++ox) {
+          const int32_t sx = ox * srcW / outW;
+          if (bpp == 24 || bpp == 32) {
+            const uint8_t* p = row + sx * (bpp / 8);
+            gray[ox] = static_cast<uint8_t>((p[2] * 77u + p[1] * 150u + p[0] * 29u) >> 8);
+          } else if (bpp == 8) {
+            gray[ox] = palette[row[sx]];
+          } else {
+            gray[ox] = palette[(row[sx >> 3] >> (7 - (sx & 7))) & 1u];
+          }
+        }
+        WideTargetSink::onRow(&sink, static_cast<uint16_t>(oy), gray, static_cast<uint16_t>(outW));
+      }
+    }
+    scratch_.reset();
+    return ok;
+  }
+
+  // PNG and JPEG go through the book engine's streaming decoders, with the
+  // file standing in for a stored container entry.
+  freeink::book::BookSource* source = storage_.openBook(path);
+  if (!source) return false;
+  const ZipEntry entry = freeink::book::ZipEntryReader::rawEntry(static_cast<uint32_t>(source->size()));
+  uint16_t outW = 0, outH = 0;
+  struct ProbeOnly {
+    static bool stopRow(void*, uint16_t, const uint8_t*, uint16_t) { return false; }
+  };
+  freeink::book::ImageRenderer::renderEntry(*source, entry, maxW, maxH, scratch_, ProbeOnly::stopRow, nullptr, &outW,
+                                            &outH, false);
+  scratch_.reset();
+  if (outW > 0 && outH > 0) {
+    const size_t errCap = outW + 4u;
+    int16_t* err0 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err1 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err2 = scratch_.allocArray<int16_t>(errCap);
+    if (err0 && err1 && err2) {
+      memset(err0, 0, errCap * sizeof(int16_t));
+      memset(err1, 0, errCap * sizeof(int16_t));
+      memset(err2, 0, errCap * sizeof(int16_t));
+      WideTargetSink sink{&t,
+                          static_cast<int16_t>(box.x + (box.width - outW) / 2),
+                          static_cast<int16_t>(box.y + (box.height - outH) / 2),
+                          err0,
+                          err1,
+                          err2,
+                          outW};
+      ok = freeink::book::ImageRenderer::renderEntry(*source, entry, maxW, maxH, scratch_, WideTargetSink::onRow,
+                                                     &sink, nullptr, nullptr, false) == BookStatus::Ok;
+    }
+  }
+  scratch_.reset();
+  storage_.closeBook();
+  return ok;
+}
+
 }  // namespace inkling

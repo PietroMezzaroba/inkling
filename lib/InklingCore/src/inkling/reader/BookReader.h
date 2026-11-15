@@ -13,6 +13,7 @@
 #include <cstdint>
 
 #include "inkling/Platform.h"
+#include "inkling/reader/Marks.h"
 
 namespace inkling {
 
@@ -132,6 +133,7 @@ class BookReader {
   const char* title() const { return title_; }
   const char* author() const { return author_; }
   const char* path() const { return path_; }
+  const char* cacheDir() const { return cacheDir_; }
   void currentChapterTitle(char* out, size_t cap) const;
 
   size_t tocCount() const;
@@ -153,6 +155,50 @@ class BookReader {
   size_t indexHighWater() const { return index_.highWater(); }
   size_t parseHighWater() const { return parse_.highWater(); }
 
+  // --- The words and links of the page on screen (PageTools.cpp) ------------
+
+  // One word as drawn, in logical screen coordinates.
+  struct PageWord {
+    int16_t x = 0, y = 0;
+    uint16_t w = 0;
+    uint8_t h = 0;
+    uint8_t line = 0;  // 0-based line on the page
+  };
+  static constexpr uint16_t kMaxPageWords = 400;
+  // Words of the current page in reading order; returns how many (<= cap).
+  uint16_t pageWords(PageWord* out, uint16_t cap);
+  // Text of words [first, last] as running prose: single spaces, words split
+  // by line-end hyphenation rejoined, typographic ligatures expanded.
+  size_t pageWordsText(uint16_t first, uint16_t last, char* out, size_t cap);
+  // Fills the passage fields of `mark` (word hashes, count, opening words) for
+  // words [first, last] of the current page.
+  bool describePassage(uint16_t first, uint16_t last, Mark* mark);
+  // Underlines the passages of `marks` that are on the current page. Call
+  // right after render(). Returns how many were found.
+  uint8_t underlineHighlights(freeink::ui::DrawTarget& t, const Mark* marks, int count);
+
+  // Where the page on screen starts and where the next one does (UINT32_MAX on
+  // the last page of a chapter).
+  uint32_t pageCharStart() const { return pos_.charStart; }
+  uint32_t pageCharEnd() const;
+  void jumpTo(const ReadingPosition& position);
+
+  // A link on the page; consecutive boxes of the same link share `id`.
+  struct PageLinkBox {
+    int16_t x = 0, y = 0;
+    uint16_t w = 0, h = 0;
+    uint8_t id = 0;
+  };
+  uint16_t pageLinks(PageLinkBox* out, uint16_t cap, uint8_t* linkCountOut = nullptr);
+  enum class LinkResult : uint8_t { Jumped, External, Missing };
+  // Follows link `id`: an internal one (footnote, cross-reference) moves the
+  // reading position; an external one is copied to `urlOut`.
+  LinkResult followLink(uint8_t id, char* urlOut, size_t urlCap);
+
+  // Draws a standalone image file (BMP, PNG, JPEG) centred in `box`, scaled
+  // down to fit and dithered. Only when no book is open.
+  bool drawImageFile(freeink::ui::DrawTarget& t, const char* path, freeink::ui::Rect box);
+
   // Ensures every EPUB in `library` has its 64x92 thumbnail (cov_<hash>.bin),
   // lock-screen cover (slp_<hash>.bin), and metadata summary (sum_<hash>.bin).
   void precacheLibrary(Library& library);
@@ -169,6 +215,14 @@ class BookReader {
     const uint8_t* italic = nullptr;
     uint32_t italicLen = 0;
   };
+
+  // One word fragment of the page. `lineEnd` is true for the last one on its
+  // line: with a trailing hyphen it continues in the next fragment.
+  using WordFn = void (*)(void* user, uint16_t index, const PageWord& box, const char* text, uint16_t len,
+                          bool lineEnd);
+  // Reads the current page and calls `fn` for every word, in reading order.
+  uint16_t walkWords(WordFn fn, void* user);
+  static uint32_t wordHash(const char* text, uint16_t len, uint32_t seed);
 
   void applyLayout(const ReaderLayout& layout);
   BookStatus ensureChapter();

@@ -409,6 +409,104 @@ void fastStroke(DrawTarget& t, Rect r, Paint paint, uint8_t width, uint8_t radiu
   }
 }
 
+void invertRect(Rect r) {
+  if (!g_fb) return;
+  const int16_t lw = logicalW();
+  const int16_t lh = logicalH();
+  int16_t x0 = r.x < 0 ? 0 : r.x;
+  int16_t y0 = r.y < 0 ? 0 : r.y;
+  int16_t x1 = static_cast<int16_t>(r.x + r.width);
+  int16_t y1 = static_cast<int16_t>(r.y + r.height);
+  if (x1 > lw) x1 = lw;
+  if (y1 > lh) y1 = lh;
+  for (int16_t y = y0; y < y1; ++y) {
+    for (int16_t x = x0; x < x1; ++x) {
+      int16_t px = x, py = y;
+      switch (g_orientation) {
+        case freeink::ui::Orientation::Portrait:
+          px = y;
+          py = static_cast<int16_t>(g_ph - 1 - x);
+          break;
+        case freeink::ui::Orientation::PortraitInverted:
+          px = static_cast<int16_t>(g_pw - 1 - y);
+          py = x;
+          break;
+        case freeink::ui::Orientation::LandscapeClockwise:
+          px = static_cast<int16_t>(g_pw - 1 - x);
+          py = static_cast<int16_t>(g_ph - 1 - y);
+          break;
+        case freeink::ui::Orientation::LandscapeCounterClockwise:
+        default:
+          break;
+      }
+      g_fb[static_cast<int32_t>(py) * g_pwb + (px >> 3)] ^= static_cast<uint8_t>(0x80u >> (px & 7));
+    }
+  }
+}
+
+int drawWrapped(DrawTarget& t, Rect r, const char* text, FontSlot slot, Color color, int firstLine, int* linesFit) {
+  static constexpr int16_t kLineHeights[] = {17, 21, 26, 31, 38};
+  const int16_t lineH = kLineHeights[slot <= kFontHero ? slot : kFontBody];
+  const int fit = r.height / lineH > 0 ? r.height / lineH : 1;
+  if (linesFit) *linesFit = fit;
+  if (!text || !*text || r.width < 8) return 0;
+
+  char line[160];
+  size_t lineLen = 0;
+  int lineNo = 0;
+  auto flush = [&] {
+    line[lineLen] = '\0';
+    if (lineNo >= firstLine && lineNo < firstLine + fit && lineLen > 0) {
+      drawText(t, Rect{r.x, static_cast<int16_t>(r.y + (lineNo - firstLine) * lineH), r.width, lineH}, line, slot,
+               color, TextAlign::Left, false);
+    }
+    ++lineNo;
+    lineLen = 0;
+  };
+
+  const char* p = text;
+  while (*p) {
+    if (*p == '\n') {
+      flush();
+      ++p;
+      continue;
+    }
+    if (*p == ' ') {
+      ++p;
+      continue;
+    }
+    const char* wordEnd = p;
+    while (*wordEnd && *wordEnd != ' ' && *wordEnd != '\n') ++wordEnd;
+    size_t wordLen = static_cast<size_t>(wordEnd - p);
+    if (wordLen > 60) {  // an unbreakable run: cut it, on a character boundary
+      wordLen = 60;
+      while (wordLen > 1 && (static_cast<uint8_t>(p[wordLen]) & 0xC0) == 0x80) --wordLen;
+    }
+    // Would the line still fit with this word added?
+    const size_t withSpace = lineLen ? lineLen + 1 : 0;
+    if (withSpace + wordLen + 1 < sizeof(line)) {
+      const size_t before = lineLen;
+      if (lineLen) line[lineLen++] = ' ';
+      memcpy(line + lineLen, p, wordLen);
+      lineLen += wordLen;
+      line[lineLen] = '\0';
+      if (before > 0 && textWidth(t, line, slot) > r.width) {
+        lineLen = before;
+        flush();
+        memcpy(line, p, wordLen);
+        lineLen = wordLen;
+      }
+    } else {
+      flush();
+      memcpy(line, p, wordLen);
+      lineLen = wordLen;
+    }
+    p += wordLen;
+  }
+  if (lineLen > 0) flush();
+  return lineNo;
+}
+
 void drawText(DrawTarget& t, Rect r, const char* str, FontSlot slot, Color color, TextAlign align, bool ellipsis) {
   (void)ellipsis;
   if (!str || !*str || r.empty()) return;

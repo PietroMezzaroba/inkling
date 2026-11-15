@@ -49,6 +49,14 @@ enum class DeskWidgetType : uint8_t {
   Count,
 };
 
+// What the panel shows while the device is off.
+enum class SleepScreenMode : uint8_t {
+  Cover = 0,   // the book being read
+  Images = 1,  // pictures from /sleep on the card, one after the other
+  Poster = 2,  // the geometric poster
+  Count,
+};
+
 struct InklingSettings {
   static constexpr uint32_t kMagic = 0x494E4B53u;  // "INKS"
   static constexpr uint8_t kVersion = 1;
@@ -63,7 +71,10 @@ struct InklingSettings {
   RefreshCadence refreshCadence = RefreshCadence::Pages12;
   DeskWidgetType deskWidget = DeskWidgetType::StoicQuote;
   bool nightMode = false;
-  uint8_t reserved[7] = {};
+  // Taken from the reserved bytes: files written before them read as zero.
+  SleepScreenMode sleepScreen = SleepScreenMode::Cover;
+  uint8_t sleepImageIndex = 0;  // next picture of /sleep to show
+  uint8_t reserved[5] = {};
 
   bool autoRotation() const { return rotationMode == RotationMode::Auto || rotationMode == RotationMode::AutoAll; }
   bool autoAllowsLandscape() const { return rotationMode == RotationMode::AutoAll; }
@@ -81,6 +92,8 @@ struct InklingSettings {
   const char* deskWidgetLabel() const;
   const char* invertKeysLabel() const;
   const char* nightModeLabel() const;
+  const char* sleepScreenLabel() const;
+  void cycleSleepScreen(int delta);
 
   void cycleRotationMode(int delta);
   void cycleInvertKeys();

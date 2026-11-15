@@ -59,7 +59,6 @@ static constexpr AlignPreset kAlignPresets[] = {
 constexpr uint8_t kAlignPresetCount = sizeof(kAlignPresets) / sizeof(kAlignPresets[0]);
 
 constexpr const char* kPrefsPath = "/.inkling/prefs.bin";
-constexpr const char* kReadingStatsPath = "/.inkling/reading.bin";
 // last.txt: the book to reopen at boot (cleared when the user closes it).
 // recent.txt: the most recent book, never cleared, for "Continua" and Home.
 constexpr const char* kLastBookPath = "/.inkling/last.txt";
@@ -78,28 +77,24 @@ struct Prefs {
 };
 constexpr uint32_t kPrefsMagic = 0x334B4E49u;  // "INK3"
 
-struct ReadingStatsRecord {
-  uint32_t magic;
-  uint32_t totalPages;
-  int32_t lastReadDay;
-  uint16_t dailyPages;
-  uint16_t streakDays;
-};
-constexpr uint32_t kReadingStatsMagic = 0x54534452u;  // "RDST"
 constexpr uint16_t kDailyPageGoal = 15;
 
 enum ReaderMenuItem : int {
   kMenuContinue = 0,
   kMenuToc = 1,
-  kMenuFontSize = 2,
-  kMenuFontFamily = 3,
-  kMenuFocusReading = 4,
-  kMenuSpacing = 5,
-  kMenuAlignment = 6,
-  kMenuNightMode = 7,
-  kMenuSettings = 8,
-  kMenuHome = 9,
-  kMenuCount = 10,
+  kMenuBookmark = 2,
+  kMenuClip = 3,
+  kMenuDictionary = 4,
+  kMenuLinks = 5,
+  kMenuFontSize = 6,
+  kMenuFontFamily = 7,
+  kMenuFocusReading = 8,
+  kMenuSpacing = 9,
+  kMenuAlignment = 10,
+  kMenuNightMode = 11,
+  kMenuSettings = 12,
+  kMenuHome = 13,
+  kMenuCount = 14,
 };
 
 enum SettingsItem : int {
@@ -109,9 +104,10 @@ enum SettingsItem : int {
   kSetRefreshCadence = 3,
   kSetDeskWidget = 4,
   kSetTheme = 5,
-  kSetWifiOta = 6,
-  kSetDiagnostic = 7,
-  kSetCount = 8,
+  kSetSleepScreen = 6,
+  kSetWifiOta = 7,
+  kSetDiagnostic = 8,
+  kSetCount = 9,
 };
 
 // Library rows after the books: Diagnostica, Wi-Fi.
@@ -123,8 +119,10 @@ enum HomeDockItem : int {
   kDockDesk = 2,
   kDockOracle = 3,
   kDockRpg = 4,
-  kDockSystem = 5,
-  kDockCount = 6,
+  kDockCards = 5,
+  kDockStats = 6,
+  kDockSystem = 7,
+  kDockCount = 8,
 };
 
 }  // namespace
@@ -186,6 +184,7 @@ void InklingApp::enterMode(Mode mode, UiApp::ScreenFn fn, void* user, RefreshHin
   mode_ = mode;
   applyOrientation();  // may rotate (and relayout the book) before the first frame
   cursorOnlyRedraw_ = false;
+  fullDrawPending_ = true;
   ui_.setScreen(fn, user, hint);
 }
 
@@ -218,6 +217,7 @@ void InklingApp::onOrientationChanged(Orientation orient) {
   // Every partial-redraw shortcut assumed the old pixel layout.
   needsReaderBackdrop_ = true;
   cursorOnlyRedraw_ = false;
+  fullDrawPending_ = true;
   ui_.invalidate(RefreshHint::Full);
 }
 
@@ -284,7 +284,9 @@ void InklingApp::begin() {
   rpg_.load(storage_);
   homeDock_.reset(kDockCount, 0);
   settingsMenu_.reset(kSetCount, 0);
-  INKLING_LOG("library: %d books, %lu pages read", library_.count(), static_cast<unsigned long>(totalPagesRead_));
+  cards_.scan(storage_);
+  INKLING_LOG("library: %d books, %lu pages read", library_.count(),
+              static_cast<unsigned long>(stats_.totalPages()));
 
   char last[128] = {};
   char lock = '0';
@@ -357,6 +359,10 @@ void InklingApp::showMessage(const char* text) {
 
 void InklingApp::flush(RefreshHint hint) {
   if (!ui_.invalidated()) return;
+  if (fullDrawPending_) {
+    fullDrawPending_ = false;
+    cursorOnlyRedraw_ = false;
+  }
   ui_.render(freeink::ui::InputSnapshot{});
   if (present_) present_(hint, presentUser_);
 }
@@ -367,6 +373,8 @@ void InklingApp::update() {
 }
 
 void InklingApp::shutdown() {
+  leaveSelect();
+  cards_.end();
   if (reader_) reader_->close();
   progressDirty_ = false;
   savePrefs();
@@ -417,14 +425,7 @@ void InklingApp::loadPrefs() {
     focusReading_ = (p.focusReading != 0);
     nightMode_ = (p.nightMode != 0);
   }
-  ReadingStatsRecord rs{};
-  if (storage_.readFile(kReadingStatsPath, &rs, sizeof(rs)) == static_cast<int32_t>(sizeof(rs)) &&
-      rs.magic == kReadingStatsMagic) {
-    totalPagesRead_ = rs.totalPages;
-    lastReadDay_ = rs.lastReadDay;
-    dailyPages_ = rs.dailyPages;
-    streakDays_ = rs.streakDays;
-  }
+  stats_.load(storage_);
 }
 
 void InklingApp::savePrefs() {
@@ -446,34 +447,18 @@ void InklingApp::saveStats() {
   statsDirty_ = false;
   pagesSinceStatsSave_ = 0;
   rpg_.save(storage_);
-  const ReadingStatsRecord rs{
-      kReadingStatsMagic,
-      totalPagesRead_,
-      lastReadDay_,
-      dailyPages_,
-      streakDays_,
-  };
-  storage_.writeFile(kReadingStatsPath, &rs, sizeof(rs));
+  stats_.save(storage_);
 }
 
 void InklingApp::recordPageRead() {
-  ++totalPagesRead_;
-  const LocalTime now = currentLocalTime();
-  if (now.valid) {
-    const int32_t today = dayNumber(now.year, now.month, now.day);
-    if (lastReadDay_ != today) {
-      if (lastReadDay_ == today - 1) {
-        ++streakDays_;
-      } else {
-        streakDays_ = 1;
-      }
-      lastReadDay_ = today;
-      dailyPages_ = 0;
-    }
-  } else if (streakDays_ == 0) {
-    streakDays_ = 1;
+  // Time on the page just left: counted when it is plausible reading time
+  // (not a pause of ten minutes), and never more than four minutes a page.
+  uint32_t seconds = 0;
+  if (lastTurnMs_ != 0) {
+    const uint32_t elapsed = status_.uptimeMs - lastTurnMs_;
+    if (elapsed < 10u * 60u * 1000u) seconds = elapsed / 1000u > 240u ? 240u : elapsed / 1000u;
   }
-  ++dailyPages_;
+  stats_.onPage(currentLocalTime(), seconds);
   rpg_.grantReadingBonus(1);
   statsDirty_ = true;
   if (pagesSinceStatsSave_ < 255) ++pagesSinceStatsSave_;
@@ -570,6 +555,9 @@ bool InklingApp::openBook(const char* path, bool resuming) {
     showMessage(text);
     return false;
   }
+  marks_.load(storage_, reader_->cacheDir());
+  hasLinkReturn_ = false;
+  lastTurnMs_ = status_.uptimeMs ? status_.uptimeMs : 1;
   snprintf(lastBookPath_, sizeof(lastBookPath_), "%s", path);
   storage_.writeFile(kLastBookPath, path, static_cast<uint32_t>(strlen(path)));
   storage_.writeFile(kRecentBookPath, path, static_cast<uint32_t>(strlen(path)));
@@ -584,6 +572,9 @@ bool InklingApp::openBook(const char* path, bool resuming) {
 
 void InklingApp::closeBook() {
   applyPendingLayout();  // keep the user's last typography change
+  leaveSelect();
+  hasLinkReturn_ = false;
+  marks_.clear();
   if (reader_) reader_->close();
   progressDirty_ = false;
   savePrefs();
@@ -614,6 +605,9 @@ void InklingApp::turnPage(bool forward) {
   if (forward) {
     recordPageRead();
   }
+  lastTurnMs_ = status_.uptimeMs ? status_.uptimeMs : 1;
+  // Reading on from where a link led: Back means "close the book" again.
+  if (hasLinkReturn_ && ++turnsSinceLink_ > 3) hasLinkReturn_ = false;
 
   if (++turnsSinceFull_ >= settings_.fullRefreshPages()) {
     turnsSinceFull_ = 0;
@@ -674,6 +668,18 @@ void InklingApp::adjustMenuItem(int item, int delta) {
         }
       }
       return;
+    case kMenuBookmark:
+      showMarks();  // SX/DX: the list
+      return;
+    case kMenuClip:
+      enterSelect(SelectPurpose::Clip);
+      return;
+    case kMenuDictionary:
+      enterSelect(SelectPurpose::Lookup);
+      return;
+    case kMenuLinks:
+      enterLinks();
+      return;
     case kMenuFontSize: {
       const int next = (static_cast<int>(fontStep_) + delta + kFontSizeCount) % kFontSizeCount;
       fontStep_ = static_cast<uint8_t>(next);
@@ -725,6 +731,15 @@ void InklingApp::runMenuItem(int item) {
   switch (item) {
     case kMenuContinue:     exitReaderMenu(); break;
     case kMenuToc:          showToc(); break;
+    case kMenuBookmark:
+      applyPendingLayout();
+      toggleBookmark();
+      cursorOnlyRedraw_ = true;
+      ui_.invalidate(RefreshHint::Fast);
+      break;
+    case kMenuClip:         enterSelect(SelectPurpose::Clip); break;
+    case kMenuDictionary:   enterSelect(SelectPurpose::Lookup); break;
+    case kMenuLinks:        enterLinks(); break;
     case kMenuFontSize:     adjustMenuItem(kMenuFontSize, 1); break;
     case kMenuFontFamily:   adjustMenuItem(kMenuFontFamily, 1); break;
     case kMenuFocusReading: adjustMenuItem(kMenuFocusReading, 1); break;
@@ -744,6 +759,8 @@ void InklingApp::runHomeDockItem(int item) {
     case kDockDesk:    showDeskAmbient(); break;
     case kDockOracle:  showOracle(); break;
     case kDockRpg:     showTextRpg(); break;
+    case kDockCards:   showFlashcards(); break;
+    case kDockStats:   showStats(); break;
     case kDockSystem:  showSettings(); break;
     default:           break;
   }
@@ -789,6 +806,10 @@ void InklingApp::adjustSettingItem(int item, int delta) {
       settings_.toggleNightMode();
       nightMode_ = settings_.nightMode;
       savePrefs();
+      break;
+
+    case kSetSleepScreen:
+      settings_.cycleSleepScreen(delta);
       break;
 
     case kSetWifiOta:
@@ -1057,7 +1078,26 @@ void InklingApp::onButton(Button button) {
       if (down) turnPage(true);
       if (up) turnPage(false);
       if (button == Button::Confirm) showReaderMenu();
-      if (button == Button::Back) closeBook();
+      if (button == Button::Back) {
+        if (hasLinkReturn_) {
+          // Back from a footnote or a cross-reference: to where it was followed.
+          hasLinkReturn_ = false;
+          reader_->jumpTo(linkReturn_);
+          reader_->prepare();
+          showReader(RefreshHint::Clean);
+        } else {
+          closeBook();
+        }
+      }
+      break;
+
+    case Mode::Marks:
+    case Mode::Select:
+    case Mode::Links:
+    case Mode::Definition:
+    case Mode::Flashcards:
+    case Mode::Stats:
+      onToolButton(button);
       break;
 
     case Mode::ReaderMenu: {
@@ -1200,20 +1240,21 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
     const int16_t rx = static_cast<int16_t>(clockCard.x + 222);
     const int16_t rw = static_cast<int16_t>(clockCard.right() - rx - 14);
     drawPill(t, rx, fy, 22, "OGGI", kFontMicro, true, 10);
+    const unsigned todayPages = self.stats_.todayPages(now);
+    const unsigned todayMinutes = self.stats_.todayMinutes(now);
+    const unsigned streakDays = self.stats_.streakDays(now);
     char pages[40];
-    snprintf(pages, sizeof(pages), "%u / %u pagine", static_cast<unsigned>(self.dailyPages_),
-             static_cast<unsigned>(kDailyPageGoal));
+    snprintf(pages, sizeof(pages), "%u / %u pagine", todayPages, static_cast<unsigned>(kDailyPageGoal));
     drawText(t, Rect{rx, static_cast<int16_t>(fy + 30), rw, 26}, pages, kFontBody, Color::Black);
-    const uint8_t goalPct = static_cast<uint8_t>(
-        self.dailyPages_ >= kDailyPageGoal ? 100 : (self.dailyPages_ * 100u) / kDailyPageGoal);
+    const uint8_t goalPct =
+        static_cast<uint8_t>(todayPages >= kDailyPageGoal ? 100 : (todayPages * 100u) / kDailyPageGoal);
     drawProgressBar(t, Rect{rx, static_cast<int16_t>(fy + 60), rw, 14}, goalPct, false);
-    char streak[40];
-    snprintf(streak, sizeof(streak), "Serie: %u %s", static_cast<unsigned>(self.streakDays_),
-             self.streakDays_ == 1 ? "giorno" : "giorni");
+    char streak[48];
+    snprintf(streak, sizeof(streak), "%u min · serie %u %s", todayMinutes, streakDays, streakDays == 1 ? "giorno" : "giorni");
     drawText(t, Rect{rx, static_cast<int16_t>(fy + 82), rw, 22}, streak, kFontSmall, Color::Black);
     char libLine[48];
     snprintf(libLine, sizeof(libLine), "%lu pag. lette · %d volumi",
-             static_cast<unsigned long>(self.totalPagesRead_), self.library_.count());
+             static_cast<unsigned long>(self.stats_.totalPages()), self.library_.count());
     drawText(t, Rect{rx, static_cast<int16_t>(fy + 102), rw, 18}, libLine, kFontMicro, Color::Black);
 
     // Book card: the active (or next) book with its real dithered cover.
@@ -1250,14 +1291,14 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
     drawBottomKeyBar(t, "FRECCE", "Sposta", "OK", "Apri", "BACK", "Libreria");
   }
 
-  // Dock: 3x2 in portrait, 2x3 in landscape.
+  // Dock: 2 columns of 4 in portrait, 3 columns in landscape.
   static const char* const kDockTitles[kDockCount] = {
-      "CONTINUA", "LIBRERIA", "OROLOGIO", "ORACOLO", "CRIPTA", "IMPOSTAZ.",
+      "CONTINUA", "LIBRERIA", "OROLOGIO", "ORACOLO", "CRIPTA", "FLASHCARD", "STATISTICHE", "IMPOSTAZ.",
   };
   static const Icon kDockIcons[kDockCount] = {
-      Icon::Book, Icon::Compass, Icon::Moon, Icon::Spark, Icon::Flame, Icon::Sliders,
+      Icon::Book, Icon::Compass, Icon::Moon, Icon::Spark, Icon::Flame, Icon::Check, Icon::Crystal, Icon::Sliders,
   };
-  char sub0[40], sub1[40], sub4[40];
+  char sub0[40], sub1[40], sub4[40], sub5[40], sub6[40];
   if (activeIdx >= 0) {
     snprintf(sub0, sizeof(sub0), "Riprendi da %u%%", static_cast<unsigned>(self.library_.at(activeIdx).progressPct));
   } else {
@@ -1266,8 +1307,20 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
   snprintf(sub1, sizeof(sub1), "%d %s su microSD", self.library_.count(),
            self.library_.count() == 1 ? "volume" : "volumi");
   snprintf(sub4, sizeof(sub4), "Dungeon RPG · Piano %d", self.rpg_.depth());
+  if (self.cards_.deckCount() > 0) {
+    snprintf(sub5, sizeof(sub5), "%d %s da ripassare", self.cards_.deckCount(),
+             self.cards_.deckCount() == 1 ? "mazzo" : "mazzi");
+  } else {
+    snprintf(sub5, sizeof(sub5), "Mazzi .csv in /flashcards");
+  }
+  {
+    const LocalTime nowT = self.currentLocalTime();
+    snprintf(sub6, sizeof(sub6), "Oggi %u pag · %u min", static_cast<unsigned>(self.stats_.todayPages(nowT)),
+             static_cast<unsigned>(self.stats_.todayMinutes(nowT)));
+  }
   const char* const subs[kDockCount] = {
-      sub0, sub1, "Desk stand e calendario", "Stoici e Oblique Strategies", sub4, "Rotazione, sleep, Wi-Fi",
+      sub0, sub1, "Desk stand e calendario", "Stoici e Oblique Strategies",
+      sub4, sub5, sub6,                      "Rotazione, sleep, Wi-Fi",
   };
 
   for (int i = 0; i < kDockCount; ++i) {
@@ -1279,13 +1332,24 @@ void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
     const Rect tr{tx, ty, tileW, tileH};
     drawCard(t, tr, 8, sel ? 4 : 2, sel, sel);
     const Color fg = sel ? Color::White : Color::Black;
-    const int16_t textY = static_cast<int16_t>(ty + tileH - 62);
-    drawIcon16(t, static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 14), kDockIcons[i], fg);
-    drawText(t, Rect{static_cast<int16_t>(tx + 14), textY, static_cast<int16_t>(tileW - 28), 26}, kDockTitles[i],
-             kFontBody, fg);
-    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(textY + 28), static_cast<int16_t>(tileW - 28),
-                     22},
-             subs[i], kFontSmall, fg);
+    if (tileH < 112) {
+      // Short tiles: icon and title share the first row.
+      const int16_t rowY = static_cast<int16_t>(ty + (tileH - 54) / 2);
+      drawIcon16(t, static_cast<int16_t>(tx + 14), static_cast<int16_t>(rowY + 5), kDockIcons[i], fg);
+      drawText(t, Rect{static_cast<int16_t>(tx + 40), rowY, static_cast<int16_t>(tileW - 52), 26}, kDockTitles[i],
+               kFontBody, fg);
+      drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(rowY + 30),
+                       static_cast<int16_t>(tileW - 28), 22},
+               subs[i], kFontSmall, fg);
+    } else {
+      const int16_t textY = static_cast<int16_t>(ty + tileH - 62);
+      drawIcon16(t, static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 14), kDockIcons[i], fg);
+      drawText(t, Rect{static_cast<int16_t>(tx + 14), textY, static_cast<int16_t>(tileW - 28), 26}, kDockTitles[i],
+               kFontBody, fg);
+      drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(textY + 28),
+                       static_cast<int16_t>(tileW - 28), 22},
+               subs[i], kFontSmall, fg);
+    }
   }
   self.cursorOnlyRedraw_ = false;
 }
@@ -1384,8 +1448,7 @@ void InklingApp::readerScreen(UiApp::ScreenType& screen, void* user) {
   const int16_t w = screenW();
   const int16_t h = screenH();
 
-  clearScreen();
-  self.lastRenderStatus_ = self.reader_->render(self.frame_);
+  self.drawReaderPage(t);
   self.progressDirty_ = true;  // written by idleTick(), after the panel refresh
   self.needsReaderBackdrop_ = false;
   if (self.resumePending_ && self.lastRenderStatus_ == freeink::book::BookStatus::Ok) {
@@ -1427,7 +1490,14 @@ void InklingApp::readerScreen(UiApp::ScreenType& screen, void* user) {
 
   const int16_t titleW = static_cast<int16_t>(metaX - 14 - 10);
   char chapTitle[64];
-  self.reader_->currentChapterTitle(chapTitle, sizeof(chapTitle));
+  if (self.readerNotice_) {
+    snprintf(chapTitle, sizeof(chapTitle), "%s", self.readerNotice_);
+    self.readerNotice_ = nullptr;
+  } else if (self.hasLinkReturn_) {
+    snprintf(chapTitle, sizeof(chapTitle), "BACK: torna al testo");
+  } else {
+    self.reader_->currentChapterTitle(chapTitle, sizeof(chapTitle));
+  }
   drawText(t, Rect{14, static_cast<int16_t>(hudY + 8), titleW, 24}, chapTitle, kFontSmall, Color::Black);
   if (self.nightMode_) invertScreen();
 }
@@ -1470,8 +1540,7 @@ void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
     // Coming from anywhere but the page itself (TOC, settings, a rotation),
     // the page under the modal has to be drawn again first.
     if (self.needsReaderBackdrop_ && self.reader_ && self.reader_->isOpen()) {
-      clearScreen();
-      self.reader_->render(self.frame_);
+      self.drawReaderPage(t);
       if (self.nightMode_) invertScreen();
     }
     self.needsReaderBackdrop_ = false;
@@ -1493,14 +1562,25 @@ void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
            kFontSmall, false, 10);
 
   static const char* const kTitles[kMenuCount] = {
-      "TORNA AL LIBRO", "INDICE CAPITOLI", "DIMENSIONE TESTO", "CARATTERE",    "LETTURA VELOCE",
-      "SPAZIATURA",     "IMPAGINAZIONE",   "MODALITÀ NOTTE",   "IMPOSTAZIONI", "CHIUDI LIBRO",
+      "TORNA AL LIBRO", "INDICE CAPITOLI", "SEGNALIBRO",       "RITAGLIA TESTO", "DIZIONARIO",
+      "NOTE E LINK",    "DIMENSIONE TESTO", "CARATTERE",       "LETTURA VELOCE", "SPAZIATURA",
+      "IMPAGINAZIONE",  "MODALITÀ NOTTE",   "IMPOSTAZIONI",    "CHIUDI LIBRO",
   };
   static const Icon kRowIcons[kMenuCount] = {
-      Icon::Book,    Icon::Compass, Icon::Spark, Icon::Sliders, Icon::Flame,
-      Icon::Sliders, Icon::Check,   Icon::Moon,  Icon::Sliders, Icon::Book,
+      Icon::Book,    Icon::Compass, Icon::Flame,   Icon::Check, Icon::Spark, Icon::Compass, Icon::Spark,
+      Icon::Sliders, Icon::Flame,   Icon::Sliders, Icon::Check, Icon::Moon,  Icon::Sliders, Icon::Book,
   };
-  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48];
+  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48], vb[48], vl[48];
+  const bool pageMarked = self.marks_.bookmarkOn(self.reader_->currentSpine(), self.reader_->pageCharStart(),
+                                                 self.reader_->pageCharEnd()) >= 0;
+  snprintf(vb, sizeof(vb), "OK: %s  ·  SX/DX: elenco (%d)", pageMarked ? "togli" : "metti qui", self.marks_.count());
+  uint8_t pageLinkCount = 0;
+  self.reader_->pageLinks(nullptr, 0, &pageLinkCount);
+  if (pageLinkCount > 0) {
+    snprintf(vl, sizeof(vl), "%u in questa pagina  ·  OK", static_cast<unsigned>(pageLinkCount));
+  } else {
+    snprintf(vl, sizeof(vl), "Nessuno in questa pagina");
+  }
   snprintf(v0, sizeof(v0), "%s  ·  SX/DX ±10%%", self.layoutDirty_ ? "OK: applica" : "OK: continua");
   snprintf(v1, sizeof(v1), "Cap. %u di %u  ·  OK: apri", static_cast<unsigned>(self.reader_->currentSpine() + 1),
            static_cast<unsigned>(self.reader_->spineCount()));
@@ -1511,7 +1591,9 @@ void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
   snprintf(v6, sizeof(v6), "<  %s  >", kAlignPresets[alStep].label);
   snprintf(v7, sizeof(v7), "<  %s  >", self.nightMode_ ? "Scura" : "Chiara");
   const char* const values[kMenuCount] = {
-      v0, v1, v2, v3, v4, v5, v6, v7, "Rotazione, sleep, Wi-Fi  ·  OK", "OK: chiudi e torna a Home",
+      v0, v1, vb, "OK: scegli inizio e fine", "OK: scegli una parola", vl, v2,
+      v3, v4, v5, v6,                         v7,                      "Rotazione, sleep, Wi-Fi  ·  OK",
+      "OK: chiudi e torna a Home",
   };
 
   const int first = pageFirst(sel, kMenuCount, perPage);
@@ -1646,8 +1728,8 @@ void InklingApp::settingsScreen(UiApp::ScreenType& screen, void* user) {
   drawPageDots(t, static_cast<int16_t>(w - 18), static_cast<int16_t>(contentTop() + 8), sel, kSetCount, perPage);
 
   static const char* const kTitles[kSetCount] = {
-      "ROTAZIONE SCHERMO", "TASTI E ROTAZIONE", "SPEGNIMENTO AUTOMATICO", "PULIZIA SCHERMO",
-      "WIDGET OROLOGIO",   "TEMA",              "WI-FI E AGGIORNAMENTI",  "DIAGNOSTICA",
+      "ROTAZIONE SCHERMO", "TASTI E ROTAZIONE", "SPEGNIMENTO AUTOMATICO", "PULIZIA SCHERMO", "WIDGET OROLOGIO",
+      "TEMA",              "SCHERMATA DI BLOCCO", "WI-FI E AGGIORNAMENTI", "DIAGNOSTICA",
   };
   static const char* const kSubtitles[kSetCount] = {
       "Automatica col sensore o bloccata su un lato",
@@ -1656,20 +1738,23 @@ void InklingApp::settingsScreen(UiApp::ScreenType& screen, void* user) {
       "Ogni quante pagine un refresh completo",
       "Riquadro in basso nella schermata Orologio",
       "Carta chiara o testo bianco su nero",
+      "Cosa resta sul pannello a dispositivo spento",
       "Portale web, giornale Daily Ink, firmware",
       "Sensori, batteria, memoria e slot OTA",
   };
   static const Icon kIcons[kSetCount] = {
-      Icon::Compass, Icon::Sliders, Icon::Moon, Icon::Spark, Icon::Compass, Icon::Sliders, Icon::Wifi, Icon::Sliders,
+      Icon::Compass, Icon::Sliders, Icon::Moon, Icon::Spark,   Icon::Compass,
+      Icon::Sliders, Icon::Moon,    Icon::Wifi, Icon::Sliders,
   };
-  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48];
+  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48];
+  snprintf(v6, sizeof(v6), "<  %s  >", self.settings_.sleepScreenLabel());
   snprintf(v0, sizeof(v0), "<  %s  >", self.settings_.rotationModeLabel());
   snprintf(v1, sizeof(v1), "<  %s  >", self.settings_.invertKeysLabel());
   snprintf(v2, sizeof(v2), "<  %s  >", self.settings_.autoSleepLabel());
   snprintf(v3, sizeof(v3), "<  %s  >", self.settings_.refreshCadenceLabel());
   snprintf(v4, sizeof(v4), "<  %s  >", self.settings_.deskWidgetLabel());
   snprintf(v5, sizeof(v5), "<  %s  >", self.settings_.nightModeLabel());
-  const char* const values[kSetCount] = {v0, v1, v2, v3, v4, v5, "OK: avvia il Wi-Fi", "OK: apri"};
+  const char* const values[kSetCount] = {v0, v1, v2, v3, v4, v5, v6, "OK: avvia il Wi-Fi", "OK: apri"};
 
   const int first = pageFirst(sel, kSetCount, perPage);
   for (int slot = 0; slot < perPage; ++slot) {
@@ -1702,10 +1787,11 @@ void InklingApp::deskAmbientScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
   DeskInfo info;
-  info.streakDays = self.streakDays_;
-  info.todayPages = self.dailyPages_;
+  const LocalTime deskNow = self.currentLocalTime();
+  info.streakDays = self.stats_.streakDays(deskNow);
+  info.todayPages = self.stats_.todayPages(deskNow);
   info.goalPages = kDailyPageGoal;
-  info.totalPages = self.totalPagesRead_;
+  info.totalPages = self.stats_.totalPages();
   uint8_t coverBits[kCoverBytes];
   const int idx = self.activeBookIndex();
   if (idx >= 0 && idx < self.library_.count()) {

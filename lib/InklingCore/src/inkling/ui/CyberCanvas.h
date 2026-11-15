@@ -49,6 +49,10 @@ void clearScreen();
 // Full-screen bitwise B/W inversion (~0.08 ms) for Night Reading Mode.
 void invertScreen();
 
+// Inverts a logical rectangle, black <-> white: the selection cursor. Doing
+// it twice restores the pixels, so a cursor moves without redrawing the page.
+void invertRect(Rect r);
+
 // Clears a horizontal band y in [y0, y1) across the full width to white.
 void clearBandY(int16_t y0, int16_t y1);
 // Clears an arbitrary logical rectangle to white.
@@ -61,6 +65,12 @@ void fastStroke(DrawTarget& t, Rect r, Paint paint, uint8_t width, uint8_t radiu
 // Draws a single-line or clipped text helper using a specific Inkling FontSlot.
 void drawText(DrawTarget& t, Rect r, const char* str, FontSlot slot, Color color = Color::Black,
               TextAlign align = TextAlign::Left, bool ellipsis = true);
+
+// Word-wrapped text in `r`: line breaks at spaces and at '\n'. Draws the
+// lines from `firstLine` that fit and returns the total line count of `text`,
+// so a long text can be paged (`linesFit`, optional, is the page size).
+int drawWrapped(DrawTarget& t, Rect r, const char* text, FontSlot slot, Color color = Color::Black,
+                int firstLine = 0, int* linesFit = nullptr);
 
 // Measures pixel width of a string in the given slot.
 int16_t textWidth(DrawTarget& t, const char* str, FontSlot slot);
