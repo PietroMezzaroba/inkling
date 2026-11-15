@@ -31,12 +31,25 @@ uint8_t InklingSettings::fullRefreshPages() const {
   }
 }
 
+bool InklingSettings::lockedOrientation(Orientation& out) const {
+  switch (rotationMode) {
+    case RotationMode::LockPortrait:   out = Orientation::Portrait; return true;
+    case RotationMode::LockInverted:   out = Orientation::PortraitInverted; return true;
+    case RotationMode::LockLandscapeL: out = Orientation::LandscapeClockwise; return true;
+    case RotationMode::LockLandscapeR: out = Orientation::LandscapeCounterClockwise; return true;
+    default:                           return false;
+  }
+}
+
 const char* InklingSettings::rotationModeLabel() const {
   switch (rotationMode) {
-    case RotationMode::Auto:         return "Auto (Sensore IMU)";
-    case RotationMode::LockPortrait: return "Blocco 0° (Standard)";
-    case RotationMode::LockInverted: return "Blocco 180° (Sottosopra)";
-    default:                         return "Auto (Sensore IMU)";
+    case RotationMode::Auto:           return "Auto verticale";
+    case RotationMode::AutoAll:        return "Auto 4 lati";
+    case RotationMode::LockPortrait:   return "Verticale 0°";
+    case RotationMode::LockLandscapeL: return "Orizz. 90° tasti SX";
+    case RotationMode::LockInverted:   return "Capovolto 180°";
+    case RotationMode::LockLandscapeR: return "Orizz. 270° tasti DX";
+    default:                           return "Auto verticale";
   }
 }
 
@@ -71,15 +84,15 @@ const char* InklingSettings::refreshCadenceLabel() const {
 
 const char* InklingSettings::deskWidgetLabel() const {
   switch (deskWidget) {
-    case DeskWidgetType::GitHubHeatmap: return "GitHub Heatmap";
-    case DeskWidgetType::MoonPhase:     return "Fase Lunare & Cielo";
-    case DeskWidgetType::StoicQuote:    return "Daily Stoic & Eno";
-    default:                            return "GitHub Heatmap";
+    case DeskWidgetType::StoicQuote:  return "Pensiero del giorno";
+    case DeskWidgetType::MoonPhase:   return "Fase lunare";
+    case DeskWidgetType::ObliqueCard: return "Strategia obliqua";
+    default:                          return "Pensiero del giorno";
   }
 }
 
 const char* InklingSettings::invertKeysLabel() const {
-  return invertKeysOn180 ? "Attiva (Spaziale)" : "Disattivata (Fisso)";
+  return invertKeysOn180 ? "Seguono lo schermo" : "Fissi (come a 0°)";
 }
 
 const char* InklingSettings::nightModeLabel() const {
@@ -87,10 +100,18 @@ const char* InklingSettings::nightModeLabel() const {
 }
 
 void InklingSettings::cycleRotationMode(int delta) {
-  const int count = static_cast<int>(RotationMode::Count);
-  int cur = static_cast<int>(rotationMode);
-  cur = (cur + delta + count) % count;
-  rotationMode = static_cast<RotationMode>(cur);
+  // UI order: the two automatic modes, then the four fixed sides clockwise.
+  static constexpr RotationMode kOrder[] = {
+      RotationMode::Auto,           RotationMode::AutoAll,      RotationMode::LockPortrait,
+      RotationMode::LockLandscapeL, RotationMode::LockInverted, RotationMode::LockLandscapeR,
+  };
+  constexpr int count = static_cast<int>(sizeof(kOrder) / sizeof(kOrder[0]));
+  int cur = 0;
+  for (int i = 0; i < count; ++i) {
+    if (kOrder[i] == rotationMode) cur = i;
+  }
+  cur = ((cur + delta) % count + count) % count;
+  rotationMode = kOrder[cur];
 }
 
 void InklingSettings::cycleInvertKeys() {
@@ -132,11 +153,21 @@ void InklingSettings::toggleNightMode() {
 bool InklingSettings::load(Storage& storage) {
   InklingSettings s{};
   const int32_t n = storage.readFile(kPath, &s, sizeof(s));
-  if (n == static_cast<int32_t>(sizeof(s)) && s.magic == kMagic && s.version == kVersion) {
-    *this = s;
-    return true;
+  if (n != static_cast<int32_t>(sizeof(s)) || s.magic != kMagic || s.version != kVersion) return false;
+  const InklingSettings def{};
+  // Raw bytes from the card: clamp every enum, bools included (anything but 0/1).
+  auto bytes = [](const void* p) { return *static_cast<const uint8_t*>(p); };
+  if (bytes(&s.rotationMode) >= static_cast<uint8_t>(RotationMode::Count)) s.rotationMode = def.rotationMode;
+  if (bytes(&s.autoSleep) >= static_cast<uint8_t>(AutoSleepOption::Count)) s.autoSleep = def.autoSleep;
+  if (bytes(&s.wakeSensitivity) >= static_cast<uint8_t>(WakeSensitivity::Count)) {
+    s.wakeSensitivity = def.wakeSensitivity;
   }
-  return false;
+  if (bytes(&s.refreshCadence) >= static_cast<uint8_t>(RefreshCadence::Count)) s.refreshCadence = def.refreshCadence;
+  if (bytes(&s.deskWidget) >= static_cast<uint8_t>(DeskWidgetType::Count)) s.deskWidget = def.deskWidget;
+  if (bytes(&s.invertKeysOn180) > 1) s.invertKeysOn180 = def.invertKeysOn180;
+  if (bytes(&s.nightMode) > 1) s.nightMode = def.nightMode;
+  *this = s;
+  return true;
 }
 
 bool InklingSettings::save(Storage& storage) const {

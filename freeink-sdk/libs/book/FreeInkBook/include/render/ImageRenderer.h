@@ -38,11 +38,25 @@ class ImageRenderer {
   // heap for its scanline buffer.
   static BookStatus render(BookSource& source, const ZipCatalog& zip, const PageImage& image,
                            Arena& scratch, ImageRowFn rowFn, void* user);
+
+  // Renders any image ZipEntry directly, fitting within `maxWidth` x `maxHeight`
+  // (preserving aspect ratio unless `stretchToBox` is true). Writes the chosen
+  // output dimensions to `outWidth`/`outHeight` when non-null.
+  static BookStatus renderEntry(BookSource& source, const ZipEntry& entry, uint16_t maxWidth,
+                                uint16_t maxHeight, Arena& scratch, ImageRowFn rowFn, void* user,
+                                uint16_t* outWidth = nullptr, uint16_t* outHeight = nullptr,
+                                bool stretchToBox = false);
 };
 
 // Quantizes one grayscale row to 1 bit per pixel (MSB first, 1 = black)
 // with ordered Bayer 4×4 dithering. `outBits` needs (width+7)/8 bytes.
 void ditherRowOrdered(const uint8_t* gray, uint16_t width, uint16_t y, uint8_t* outBits);
+
+// Quantizes one grayscale row to 1 bit per pixel (MSB first, 1 = black)
+// using Atkinson error diffusion + e-paper contrast curve.
+// `err0`, `err1`, `err2` must each have at least `width + 4` entries.
+void ditherRowAtkinson(const uint8_t* gray, uint16_t width, int16_t* err0, int16_t* err1,
+                       int16_t* err2, uint8_t* outBits);
 
 }  // namespace book
 }  // namespace freeink

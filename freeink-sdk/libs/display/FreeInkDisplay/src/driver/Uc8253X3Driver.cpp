@@ -235,7 +235,7 @@ void Uc8253X3Driver::displayFinish(EpdBus& bus, const uint8_t* fb) {
     _isScreenOn = false;
   }
 
-  if (!fastMode) delay(200);
+  if (doFullSync) delay(200);
 
   uint8_t postConditionPasses = 0;
   if (doFullSync) {

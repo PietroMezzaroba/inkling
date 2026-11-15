@@ -88,6 +88,7 @@ void setup() {
   static EInkDisplay einkDisplay(pins.sclk, pins.mosi, pins.cs, pins.dc, pins.rst, pins.busy);
   display = &einkDisplay;
   display->setDisplayX3();
+  BoardConfig::ACTIVE.displaySpiHz = 20000000u;
   display->begin();
 
   static freeink::ui::DisplayTarget target(display->getFrameBuffer(), display->getDisplayWidth(),

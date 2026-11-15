@@ -1,7 +1,10 @@
 #include "inkling/desk/DeskDashboard.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+
+#include "inkling/Platform.h"
 
 namespace inkling {
 namespace {
@@ -12,6 +15,33 @@ using freeink::ui::Point;
 using freeink::ui::Rect;
 using freeink::ui::TextAlign;
 using namespace ui::canvas;
+
+struct DailyQuote {
+  const char* author;
+  const char* quote;
+};
+
+static const DailyQuote kStoicQuotes[] = {
+    {"MARCO AURELIO", "Hai potere sulla tua mente, non sugli eventi esterni. Comprendi questo con chiarezza, e troverai la forza."},
+    {"SENECA", "Non è perché le cose sono difficili che non osiamo, è perché non osiamo che sono difficili."},
+    {"EPITTETO", "Ciò che turba gli uomini non sono le cose in sé, ma i giudizi che essi formulano sulle cose."},
+    {"ITALO CALVINO", "Prendete la vita con leggerezza, che leggerezza non è superficialità, ma planare sulle cose dall'alto."},
+    {"JORGE LUIS BORGES", "Ho sempre immaginato che il Paradiso fosse una specie di biblioteca infinita."},
+    {"NIETZSCHE", "Chi ha un perché abbastanza forte per vivere, può sopportare quasi qualsiasi come."},
+    {"SENECA", "Mentre perdiamo il nostro tempo tra indugi, dubbi e rinvii, la vita se ne va inesorabile."},
+    {"SCHOPENHAUER", "La solitudine è la sorte di tutti gli spiriti eccellenti."},
+};
+
+static const DailyQuote kObliqueQuotes[] = {
+    {"BRIAN ENO", "Onora il tuo errore come un'intenzione nascosta."},
+    {"BRIAN ENO", "Usa una vecchia idea con una forma nuova."},
+    {"BRIAN ENO", "Cosa farebbe il tuo amico più caro al tuo posto?"},
+    {"BRIAN ENO", "Togli gli elementi ambigui e convertili in specifici."},
+    {"BRIAN ENO", "Fai una pausa improvvisa, osserva il silenzio e riparti."},
+    {"BRIAN ENO", "Non costruire un muro; costruisci un mattone alla volta."},
+    {"BRIAN ENO", "Guarda con estrema attenzione il dettaglio più imbarazzante e amplificalo."},
+    {"BRIAN ENO", "Cambia strumento e ripeti dall'inizio con mano leggera."},
+};
 
 int dayOfWeekMondayFirst(int y, int m, int d) {
   static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
@@ -288,203 +318,305 @@ void DeskDashboard::renderMiniCalendar(freeink::ui::DrawTarget& t, freeink::ui::
   }
 }
 
-void DeskDashboard::renderGitHubHeatmap(freeink::ui::DrawTarget& t, freeink::ui::Rect r) {
+void DeskDashboard::renderQuote(freeink::ui::DrawTarget& t, freeink::ui::Rect r, bool oblique, int32_t day) {
   fastStroke(t, r, Paint::solid(Color::Black), 1, 6);
   fastFill(t, Rect{r.x, r.y, r.width, 22}, Paint::solid(Color::Black), 5);
   drawText(t, Rect{static_cast<int16_t>(r.x + 8), static_cast<int16_t>(r.y + 3), static_cast<int16_t>(r.width - 16), 16},
-           "GITHUB COMMITS (12 WEEKS)", ui::kFontMicro, Color::White, TextAlign::Left);
-
-  const int16_t cellSize = 10;
-  const int16_t gap = 4;
-  const int16_t startX = r.x + 14;
-  const int16_t startY = r.y + 30;
-
-  for (int col = 0; col < 12; ++col) {
-    for (int row = 0; row < 7; ++row) {
-      const int16_t cx = static_cast<int16_t>(startX + col * (cellSize + gap));
-      const int16_t cy = static_cast<int16_t>(startY + row * (cellSize + gap));
-      const uint8_t hash = static_cast<uint8_t>((col * 17 + row * 29 + 11) % 100);
-      const Rect cell{cx, cy, cellSize, cellSize};
-
-      if (hash < 30) {
-        fastStroke(t, cell, Paint::solid(Color::Black), 1, 1);
-      } else if (hash < 65) {
-        fastStroke(t, cell, Paint::solid(Color::Black), 1, 1);
-        fillCircle(t, static_cast<int16_t>(cx + 5), static_cast<int16_t>(cy + 5), 1, Color::Black);
-      } else if (hash < 88) {
-        fastFill(t, cell, Paint::solid(Color::Black), 1);
-        fastFill(t, Rect{static_cast<int16_t>(cx + 2), static_cast<int16_t>(cy + 2), 2, 2}, Paint::solid(Color::White), 0);
-        fastFill(t, Rect{static_cast<int16_t>(cx + 6), static_cast<int16_t>(cy + 2), 2, 2}, Paint::solid(Color::White), 0);
-        fastFill(t, Rect{static_cast<int16_t>(cx + 4), static_cast<int16_t>(cy + 5), 2, 2}, Paint::solid(Color::White), 0);
-      } else {
-        fastFill(t, cell, Paint::solid(Color::Black), 1);
-      }
-    }
-  }
-
-  drawText(t, Rect{static_cast<int16_t>(r.x + 14), static_cast<int16_t>(r.y + r.height - 22), static_cast<int16_t>(r.width - 28), 16},
-           "184 contributi · Streak attiva: 14gg", ui::kFontMicro, Color::Black, TextAlign::Right);
+           oblique ? "STRATEGIA OBLIQUA DEL GIORNO" : "PENSIERO DEL GIORNO", ui::kFontMicro, Color::White,
+           TextAlign::Left);
+  const auto* list = oblique ? kObliqueQuotes : kStoicQuotes;
+  const int count = static_cast<int>(oblique ? (sizeof(kObliqueQuotes) / sizeof(kObliqueQuotes[0]))
+                                             : (sizeof(kStoicQuotes) / sizeof(kStoicQuotes[0])));
+  const int idx = ((day % count) + count) % count;
+  const auto& card = list[idx];
+  freeink::ui::TextStyle qs;
+  qs.font = static_cast<freeink::ui::FontId>(ui::kFontBody);
+  qs.color = Color::Black;
+  qs.align = TextAlign::Left;
+  qs.maxLines = 4;
+  t.text(Rect{static_cast<int16_t>(r.x + 14), static_cast<int16_t>(r.y + 30), static_cast<int16_t>(r.width - 28),
+              static_cast<int16_t>(r.height - 60)},
+         card.quote, qs);
+  drawText(t, Rect{static_cast<int16_t>(r.x + 14), static_cast<int16_t>(r.bottom() - 26),
+                   static_cast<int16_t>(r.width - 28), 20},
+           card.author, ui::kFontSmall, Color::Black, TextAlign::Right);
 }
 
 void DeskDashboard::renderMoonPhase(freeink::ui::DrawTarget& t, freeink::ui::Rect r, int year, int month, int day) {
   fastStroke(t, r, Paint::solid(Color::Black), 1, 6);
   fastFill(t, Rect{r.x, r.y, r.width, 22}, Paint::solid(Color::Black), 5);
   drawText(t, Rect{static_cast<int16_t>(r.x + 8), static_cast<int16_t>(r.y + 3), static_cast<int16_t>(r.width - 16), 16},
-           "FASE LUNARE ASTRONOMICA", ui::kFontMicro, Color::White, TextAlign::Left);
+           "FASE LUNARE", ui::kFontMicro, Color::White, TextAlign::Left);
 
-  int rYr = year % 100;
-  rYr %= 19;
-  if (rYr > 9) rYr -= 19;
-  int k = rYr * 11 % 30;
-  int mOffset = (month < 3) ? (month + 2) : month;
-  int age = (k + mOffset + day) % 30;
+  // Moon age from a reference new moon (2000-01-06 18:14 UTC), mean synodic
+  // month: good to well under a day, plenty for a desk clock.
+  constexpr double kSynodic = 29.530588853;
+  const double days = static_cast<double>(dayNumber(static_cast<uint16_t>(year), static_cast<uint8_t>(month),
+                                                    static_cast<uint8_t>(day))) +
+                      0.5 - (10957.0 + 5.0 + 18.23 / 24.0);
+  double age = std::fmod(days, kSynodic);
+  if (age < 0) age += kSynodic;
+  const double theta = 2.0 * 3.14159265358979 * age / kSynodic;
+  const int illum = static_cast<int>((1.0 - std::cos(theta)) * 50.0 + 0.5);
+  const bool waxing = age < kSynodic / 2.0;
 
-  const int16_t mcx = r.x + 50;
-  const int16_t mcy = r.y + 70;
-  const int16_t mRad = 26;
-
+  // Disc: dark outline, lit part filled row by row up to the terminator.
+  const int16_t mRad = 30;
+  const int16_t mcx = static_cast<int16_t>(r.x + 20 + mRad);
+  const int16_t mcy = static_cast<int16_t>(r.y + 22 + (r.height - 22) / 2);
+  fillCircle(t, mcx, mcy, mRad, Color::Black);
+  const double c = std::cos(theta);
+  for (int16_t dy = static_cast<int16_t>(-mRad + 2); dy <= mRad - 2; ++dy) {
+    const double hw = std::sqrt(static_cast<double>((mRad - 2) * (mRad - 2) - dy * dy));
+    double x0, x1;
+    if (waxing) {
+      x0 = hw * c;
+      x1 = hw;
+    } else {
+      x0 = -hw;
+      x1 = -hw * c;
+    }
+    const int16_t a = static_cast<int16_t>(mcx + x0);
+    const int16_t b = static_cast<int16_t>(mcx + x1);
+    if (b > a) fastFill(t, Rect{a, static_cast<int16_t>(mcy + dy), static_cast<int16_t>(b - a), 1},
+                        Paint::solid(Color::White));
+  }
   strokeCircle(t, mcx, mcy, mRad, 2, Color::Black);
-  fillCircle(t, mcx, mcy, mRad - 1, Color::Black);
-  fillCircle(t, static_cast<int16_t>(mcx - 16), mcy, mRad, Color::White);
-  strokeCircle(t, mcx, mcy, mRad, 2, Color::Black);
 
-  const char* phaseName = "Gibbosa Crescente";
-  if (age < 3) phaseName = "Luna Nuova";
-  else if (age < 8) phaseName = "Falce Crescente";
-  else if (age < 11) phaseName = "Primo Quarto";
-  else if (age < 16) phaseName = "Luna Piena";
-  else if (age < 20) phaseName = "Gibbosa Calante";
-  else if (age < 24) phaseName = "Ultimo Quarto";
-  else phaseName = "Falce Calante";
+  const char* phaseName;
+  if (age < 1.85) phaseName = "Luna nuova";
+  else if (age < 5.54) phaseName = "Falce crescente";
+  else if (age < 9.23) phaseName = "Primo quarto";
+  else if (age < 12.92) phaseName = "Gibbosa crescente";
+  else if (age < 16.61) phaseName = "Luna piena";
+  else if (age < 20.30) phaseName = "Gibbosa calante";
+  else if (age < 23.99) phaseName = "Ultimo quarto";
+  else if (age < 27.68) phaseName = "Falce calante";
+  else phaseName = "Luna nuova";
 
-  const int16_t tx = r.x + 92;
-  const int16_t tw = r.width - 100;
-  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 44), tw, 22}, phaseName, ui::kFontBody, Color::Black);
-  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 70), tw, 18}, "Illuminazione: 84%", ui::kFontSmall, Color::Black);
-  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 92), tw, 16}, "Prossima Piena: tra 4 gg", ui::kFontMicro, Color::Black);
+  const double toFull = age < kSynodic / 2.0 ? kSynodic / 2.0 - age : kSynodic * 1.5 - age;
+  const int16_t tx = static_cast<int16_t>(mcx + mRad + 20);
+  const int16_t tw = static_cast<int16_t>(r.right() - tx - 12);
+  char illumTxt[32], nextTxt[40];
+  snprintf(illumTxt, sizeof(illumTxt), "Illuminata al %d%%", illum);
+  const int nf = static_cast<int>(toFull + 0.5);
+  if (nf == 0) {
+    snprintf(nextTxt, sizeof(nextTxt), "Piena oggi");
+  } else {
+    snprintf(nextTxt, sizeof(nextTxt), "Prossima piena tra %d %s", nf, nf == 1 ? "giorno" : "giorni");
+  }
+  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 40), tw, 26}, phaseName, ui::kFontTitle, Color::Black);
+  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 72), tw, 22}, illumTxt, ui::kFontSmall, Color::Black);
+  drawText(t, Rect{tx, static_cast<int16_t>(r.y + 96), tw, 22}, nextTxt, ui::kFontSmall, Color::Black);
 }
 
-void DeskDashboard::render(freeink::ui::DrawTarget& t, const DeviceStatus& status, int readingStreak,
-                           int todayPages, int goalPages, int totalPages) {
+void DeskDashboard::render(freeink::ui::DrawTarget& t, const DeviceStatus& status, const DeskInfo& info) {
   clearScreen();
-  const int16_t w = kScreenW;
-
-  const int hour = status.clockValid ? status.hour : 18;
-  const int minute = status.clockValid ? status.minute : 25;
-  const int year = status.clockValid ? status.year : 2026;
-  const int month = status.clockValid ? status.month : 11;
-  const int day = status.clockValid ? status.day : 3;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
+  const bool clock = status.clockValid;
+  const int year = clock ? status.year : 2026;
+  const int month = clock ? status.month : 1;
+  const int day = clock ? status.day : 1;
   const int wd = dayOfWeekMondayFirst(year, month, day);
+  const int32_t dayIdx = dayNumber(static_cast<uint16_t>(year), static_cast<uint8_t>(month), static_cast<uint8_t>(day));
 
-  // Top Minimal HUD Bar
-  drawPill(t, 14, 8, 22, "DESK AMBIENT · XTEINK X3", ui::kFontMicro, true, 10);
+  // Top strip.
+  drawPill(t, 14, 8, 22, "OROLOGIO · XTEINK X3", ui::kFontMicro, true, 10);
   char battPill[32];
-  snprintf(battPill, sizeof(battPill), "%u%% %s", static_cast<unsigned>(status.batteryPercent),
-           status.charging ? "⚡ CHG" : "BAT");
-  drawPill(t, static_cast<int16_t>(w - 88), 8, 22, battPill, ui::kFontMicro, false, 8);
+  if (status.batteryPercent >= 0) {
+    snprintf(battPill, sizeof(battPill), "%d%%%s", static_cast<int>(status.batteryPercent),
+             status.charging ? " · IN CARICA" : "");
+  } else {
+    snprintf(battPill, sizeof(battPill), "%s", status.charging ? "IN CARICA" : "BATTERIA --");
+  }
+  const int16_t battW = static_cast<int16_t>(textWidth(t, battPill, ui::kFontMicro) + 16);
+  drawPill(t, static_cast<int16_t>(w - 14 - battW), 8, 22, battPill, ui::kFontMicro, false, 8);
 
-  // 1. GIGANTIC SPLIT-FLAP CLOCK CARDS (y=38..190)
+  char hStr[4] = "--", mStr[4] = "--";
+  if (clock) {
+    snprintf(hStr, sizeof(hStr), "%02d", status.hour % 100);
+    snprintf(mStr, sizeof(mStr), "%02d", status.minute % 100);
+  }
+  char fullDate[80];
+  if (clock) {
+    snprintf(fullDate, sizeof(fullDate), "%s %d %s %d", weekdayNameItalian(wd), day, monthNameItalian(month), year);
+  } else {
+    snprintf(fullDate, sizeof(fullDate), "ORA NON IMPOSTATA · COLLEGATI AL WI-FI");
+  }
+
+  if (w > h) {
+    // Widescreen Landscape layout (792x528):
+    // Left column (x=14..394, width=380): Split-flap clock + Date + Current Book + Sub-widget
+    // Right column (x=408..778, width=370): Calendar + Reading Streak
+    const int16_t leftX = 14;
+    const int16_t leftW = 380;
+    const int16_t cardW = 82;
+    const int16_t cardH = 114;
+    const int16_t flapY = 36;
+    const int16_t total = static_cast<int16_t>(cardW * 4 + 6 * 2 + 28);
+    const int16_t startX = static_cast<int16_t>(leftX + (leftW - total) / 2);
+
+    drawSplitFlapCard(t, startX, flapY, cardW, cardH, hStr[0]);
+    drawSplitFlapCard(t, static_cast<int16_t>(startX + cardW + 6), flapY, cardW, cardH, hStr[1]);
+    const int16_t colonX = static_cast<int16_t>(startX + cardW * 2 + 6 + 14);
+    fillCircle(t, colonX, static_cast<int16_t>(flapY + 38), 4, Color::Black);
+    fillCircle(t, colonX, static_cast<int16_t>(flapY + 76), 4, Color::Black);
+    const int16_t minStartX = static_cast<int16_t>(colonX + 14);
+    drawSplitFlapCard(t, minStartX, flapY, cardW, cardH, mStr[0]);
+    drawSplitFlapCard(t, static_cast<int16_t>(minStartX + cardW + 6), flapY, cardW, cardH, mStr[1]);
+
+    drawText(t, Rect{leftX, 156, leftW, 24}, fullDate, ui::kFontBody, Color::Black, TextAlign::Center);
+
+    const Rect bookCard{leftX, 184, leftW, 132};
+    drawCard(t, bookCard, 10, 3, false, true);
+    if (info.bookTitle && info.bookTitle[0]) {
+      drawBookCover(t, 26, 204, info.bookTitle, info.bookAuthor, info.bookCoverBits);
+      const int16_t bx = static_cast<int16_t>(26 + kCoverW + 14);
+      const int16_t bw = static_cast<int16_t>(bookCard.right() - bx - 12);
+      drawPill(t, bx, 198, 22, "IN LETTURA", ui::kFontMicro, true, 8);
+      char pct[8];
+      snprintf(pct, sizeof(pct), "%u%%", static_cast<unsigned>(info.bookPct));
+      drawText(t, Rect{static_cast<int16_t>(bx + bw - 56), 196, 56, 24}, pct, ui::kFontBody, Color::Black,
+               TextAlign::Right, false);
+      drawText(t, Rect{bx, 226, bw, 28}, info.bookTitle, ui::kFontBody, Color::Black);
+      drawText(t, Rect{bx, 254, bw, 22}, info.bookAuthor ? info.bookAuthor : "", ui::kFontSmall, Color::Black);
+      drawProgressBar(t, Rect{bx, 286, bw, 14}, info.bookPct, false);
+    } else {
+      drawIcon16(t, 30, 204, Icon::Book, Color::Black);
+      drawPill(t, 54, 200, 22, "IN LETTURA", ui::kFontMicro, true, 8);
+      drawText(t, Rect{30, 236, static_cast<int16_t>(leftW - 32), 28}, "Nessun libro sulla microSD", ui::kFontBody,
+               Color::Black);
+    }
+
+    const Rect subRect{leftX, 326, leftW, 154};
+    switch (subWidget_) {
+      case DeskSubWidget::MoonPhase:
+        renderMoonPhase(t, subRect, year, month, day);
+        break;
+      case DeskSubWidget::ObliqueCard:
+        renderQuote(t, subRect, true, dayIdx);
+        break;
+      case DeskSubWidget::StoicQuote:
+      default:
+        renderQuote(t, subRect, false, dayIdx);
+        break;
+    }
+
+    const int16_t rightX = 408;
+    const int16_t rightW = static_cast<int16_t>(w - rightX - 14);
+    const Rect calRect{rightX, 36, rightW, 166};
+    renderMiniCalendar(t, calRect, year, month, clock ? day : 0);
+
+    const Rect streakRect{rightX, 212, rightW, 268};
+    fastStroke(t, streakRect, Paint::solid(Color::Black), 1, 6);
+    fastFill(t, Rect{streakRect.x, streakRect.y, streakRect.width, 22}, Paint::solid(Color::Black), 5);
+    const int16_t sx = static_cast<int16_t>(streakRect.x + 16);
+    const int16_t sw = static_cast<int16_t>(streakRect.width - 32);
+    drawText(t, Rect{static_cast<int16_t>(streakRect.x + 10), static_cast<int16_t>(streakRect.y + 3),
+                     static_cast<int16_t>(streakRect.width - 20), 16},
+             "SERIE E OBIETTIVO DI LETTURA", ui::kFontMicro, Color::White, TextAlign::Left);
+    char streakBig[32];
+    snprintf(streakBig, sizeof(streakBig), "%d %s", info.streakDays, info.streakDays == 1 ? "GIORNO" : "GIORNI");
+    drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 36), sw, 34}, streakBig, ui::kFontHero, Color::Black);
+    char pagOggi[48];
+    snprintf(pagOggi, sizeof(pagOggi), "Oggi: %d / %d pagine lette", info.todayPages, info.goalPages);
+    drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 82), sw, 24}, pagOggi, ui::kFontBody, Color::Black);
+    const int goalPct = info.goalPages > 0 ? (info.todayPages * 100 / info.goalPages) : 0;
+    drawProgressBar(t, Rect{sx, static_cast<int16_t>(streakRect.y + 116), sw, 16},
+                    static_cast<uint8_t>(goalPct > 100 ? 100 : goalPct), false);
+    char pagTot[48];
+    snprintf(pagTot, sizeof(pagTot), "Totale complessivo: %lu pagine", static_cast<unsigned long>(info.totalPages));
+    drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 150), sw, 22}, pagTot, ui::kFontSmall, Color::Black);
+
+    drawBottomKeyBar(t, "SX/DX", "Widget", "OK", "Aggiorna", "BACK", "Esci");
+    return;
+  }
+
+  // 1. Split-flap clock (Portrait 528x792).
   const int16_t cardW = 104;
   const int16_t cardH = 144;
-  const int16_t startX = 14;
   const int16_t flapY = 38;
-
-  char hStr[4], mStr[4];
-  snprintf(hStr, sizeof(hStr), "%02d", hour);
-  snprintf(mStr, sizeof(mStr), "%02d", minute);
-
+  const int16_t total = static_cast<int16_t>(cardW * 4 + 8 * 2 + 40);
+  const int16_t startX = static_cast<int16_t>((w - total) / 2);
   drawSplitFlapCard(t, startX, flapY, cardW, cardH, hStr[0]);
   drawSplitFlapCard(t, static_cast<int16_t>(startX + cardW + 8), flapY, cardW, cardH, hStr[1]);
-
-  const int16_t colonX = static_cast<int16_t>(startX + (cardW * 2) + 20);
+  const int16_t colonX = static_cast<int16_t>(startX + cardW * 2 + 8 + 20);
   fillCircle(t, colonX, static_cast<int16_t>(flapY + 48), 5, Color::Black);
   fillCircle(t, colonX, static_cast<int16_t>(flapY + 96), 5, Color::Black);
-
   const int16_t minStartX = static_cast<int16_t>(colonX + 20);
   drawSplitFlapCard(t, minStartX, flapY, cardW, cardH, mStr[0]);
   drawSplitFlapCard(t, static_cast<int16_t>(minStartX + cardW + 8), flapY, cardW, cardH, mStr[1]);
 
-  // 2. DATE STRIP
-  char fullDate[80];
-  snprintf(fullDate, sizeof(fullDate), "%s %d %s %d", weekdayNameItalian(wd), day, monthNameItalian(month), year);
-  drawText(t, Rect{14, 192, static_cast<int16_t>(w - 28), 24}, fullDate, ui::kFontTitle, Color::Black,
+  // 2. Date.
+  drawText(t, Rect{14, 192, static_cast<int16_t>(w - 28), 26}, fullDate, ui::kFontTitle, Color::Black,
            TextAlign::Center);
 
-  // 3. WEATHER BENTO HERO CARD
-  const Rect weatherCard{14, 226, static_cast<int16_t>(w - 28), 126};
-  drawCard(t, weatherCard, 10, 3, false, true);
+  // 3. Current book.
+  const Rect bookCard{14, 226, static_cast<int16_t>(w - 28), 126};
+  drawCard(t, bookCard, 10, 3, false, true);
+  if (info.bookTitle && info.bookTitle[0]) {
+    drawBookCover(t, 28, 243, info.bookTitle, info.bookAuthor, info.bookCoverBits);
+    const int16_t bx = static_cast<int16_t>(28 + kCoverW + 16);
+    const int16_t bw = static_cast<int16_t>(bookCard.right() - bx - 14);
+    drawPill(t, bx, 240, 22, "IN LETTURA", ui::kFontMicro, true, 8);
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%u%%", static_cast<unsigned>(info.bookPct));
+    drawText(t, Rect{static_cast<int16_t>(bx + bw - 60), 238, 60, 26}, pct, ui::kFontTitle, Color::Black, TextAlign::Right,
+             false);
+    drawText(t, Rect{bx, 270, bw, 30}, info.bookTitle, ui::kFontTitle, Color::Black);
+    drawText(t, Rect{bx, 300, bw, 22}, info.bookAuthor ? info.bookAuthor : "", ui::kFontSmall,
+             Color::Black);
+    drawProgressBar(t, Rect{bx, 326, bw, 14}, info.bookPct, false);
+  } else {
+    drawIcon16(t, 30, 244, Icon::Book, Color::Black);
+    drawPill(t, 54, 240, 22, "IN LETTURA", ui::kFontMicro, true, 8);
+    drawText(t, Rect{30, 276, static_cast<int16_t>(w - 60), 30}, "Nessun libro sulla microSD", ui::kFontTitle,
+             Color::Black);
+  }
 
-  drawWeatherIcon(t, 28, 252, weather_.condition, 56);
-
-  const int16_t wx = 100;
-  const int16_t ww = static_cast<int16_t>(w - wx - 28);
-  drawPill(t, wx, 238, 22, "METEO LOCALE (WI-FI ONCE/H)", ui::kFontMicro, true, 8);
-
-  char tempBig[32];
-  snprintf(tempBig, sizeof(tempBig), "%d°C", weather_.tempC);
-  drawText(t, Rect{wx, 264, 80, 34}, tempBig, ui::kFontHero, Color::Black);
-
-  char minMax[48];
-  snprintf(minMax, sizeof(minMax), "Min %d° · Max %d° · Umidità %u%%", weather_.tempMin, weather_.tempMax,
-           weather_.humidity);
-  drawText(t, Rect{static_cast<int16_t>(wx + 84), 272, static_cast<int16_t>(ww - 84), 22}, minMax,
-           ui::kFontSmall, Color::Black);
-
-  drawText(t, Rect{wx, 304, ww, 22}, weather_.conditionText, ui::kFontBody, Color::Black);
-  drawText(t, Rect{wx, 326, ww, 18}, weather_.syncTime, ui::kFontMicro, Color::Black);
-
-  // 4. BENTO ROW 1: MINI-CALENDAR & READING STREAK
+  // 4. Calendar + reading streak.
   const int16_t halfW = static_cast<int16_t>((w - 40) / 2);
-
   const Rect calRect{14, 362, halfW, 160};
-  renderMiniCalendar(t, calRect, year, month, day);
+  renderMiniCalendar(t, calRect, year, month, clock ? day : 0);
 
   const Rect streakRect{static_cast<int16_t>(26 + halfW), 362, halfW, 160};
   fastStroke(t, streakRect, Paint::solid(Color::Black), 1, 6);
   fastFill(t, Rect{streakRect.x, streakRect.y, streakRect.width, 22}, Paint::solid(Color::Black), 5);
+  const int16_t sx = static_cast<int16_t>(streakRect.x + 12);
+  const int16_t sw = static_cast<int16_t>(streakRect.width - 24);
   drawText(t, Rect{static_cast<int16_t>(streakRect.x + 8), static_cast<int16_t>(streakRect.y + 3),
                    static_cast<int16_t>(streakRect.width - 16), 16},
-           "LETTURA & STREAK", ui::kFontMicro, Color::White, TextAlign::Left);
-
+           "LETTURA", ui::kFontMicro, Color::White, TextAlign::Left);
   char streakBig[32];
-  snprintf(streakBig, sizeof(streakBig), "%d GIORNI", readingStreak);
-  drawText(t, Rect{static_cast<int16_t>(streakRect.x + 12), static_cast<int16_t>(streakRect.y + 30),
-                   static_cast<int16_t>(streakRect.width - 24), 30},
-           streakBig, ui::kFontHero, Color::Black);
-
+  snprintf(streakBig, sizeof(streakBig), "%d %s", info.streakDays, info.streakDays == 1 ? "GIORNO" : "GIORNI");
+  drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 30), sw, 30}, streakBig, ui::kFontHero, Color::Black);
   char pagOggi[48];
-  snprintf(pagOggi, sizeof(pagOggi), "Oggi: %d / %d pag", todayPages, goalPages);
-  drawText(t, Rect{static_cast<int16_t>(streakRect.x + 12), static_cast<int16_t>(streakRect.y + 64),
-                   static_cast<int16_t>(streakRect.width - 24), 22},
-           pagOggi, ui::kFontBody, Color::Black);
-
-  const uint8_t goalPct = goalPages > 0 ? (todayPages * 100 / goalPages) : 0;
-  drawProgressBar(t, Rect{static_cast<int16_t>(streakRect.x + 12), static_cast<int16_t>(streakRect.y + 92),
-                          static_cast<int16_t>(streakRect.width - 24), 14},
-                  goalPct > 100 ? 100 : goalPct, false);
-
+  snprintf(pagOggi, sizeof(pagOggi), "Oggi %d / %d pagine", info.todayPages, info.goalPages);
+  drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 64), sw, 22}, pagOggi, ui::kFontBody, Color::Black);
+  const int goalPct = info.goalPages > 0 ? (info.todayPages * 100 / info.goalPages) : 0;
+  drawProgressBar(t, Rect{sx, static_cast<int16_t>(streakRect.y + 92), sw, 14},
+                  static_cast<uint8_t>(goalPct > 100 ? 100 : goalPct), false);
   char pagTot[48];
-  snprintf(pagTot, sizeof(pagTot), "Totale letto: %d pagine", totalPages);
-  drawText(t, Rect{static_cast<int16_t>(streakRect.x + 12), static_cast<int16_t>(streakRect.y + 116),
-                   static_cast<int16_t>(streakRect.width - 24), 18},
-           pagTot, ui::kFontSmall, Color::Black);
+  snprintf(pagTot, sizeof(pagTot), "Totale: %lu pagine", static_cast<unsigned long>(info.totalPages));
+  drawText(t, Rect{sx, static_cast<int16_t>(streakRect.y + 120), sw, 22}, pagTot, ui::kFontSmall, Color::Black);
 
-  drawText(t, Rect{static_cast<int16_t>(streakRect.x + 12), static_cast<int16_t>(streakRect.y + 136),
-                   static_cast<int16_t>(streakRect.width - 24), 16},
-           "Ritmo: Ottimo (+18% mese)", ui::kFontMicro, Color::Black);
-
-  // 5. BENTO ROW 2: CONFIGURABLE SUB-WIDGET
+  // 5. Configurable widget.
   const Rect subRect{14, 532, static_cast<int16_t>(w - 28), 152};
-  if (subWidget_ == DeskSubWidget::GitHubHeatmap) {
-    renderGitHubHeatmap(t, subRect);
-  } else if (subWidget_ == DeskSubWidget::MoonPhase) {
-    renderMoonPhase(t, subRect, year, month, day);
-  } else {
-    renderGitHubHeatmap(t, subRect);
+  switch (subWidget_) {
+    case DeskSubWidget::MoonPhase:
+      renderMoonPhase(t, subRect, year, month, day);
+      break;
+    case DeskSubWidget::ObliqueCard:
+      renderQuote(t, subRect, true, dayIdx);
+      break;
+    case DeskSubWidget::StoicQuote:
+    default:
+      renderQuote(t, subRect, false, dayIdx);
+      break;
   }
 
-  // 6. BOTTOM CONTROL STRIP
-  drawBottomKeyBar(t, "DESTRA", "Cambia Widget", "OK", "Aggiorna Meteo", "BACK", "Esci");
+  drawBottomKeyBar(t, "SX/DX", "Widget", "OK", "Aggiorna", "BACK", "Esci");
 }
 
 }  // namespace inkling

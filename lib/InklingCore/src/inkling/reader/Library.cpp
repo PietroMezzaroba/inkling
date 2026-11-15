@@ -69,6 +69,14 @@ void Library::summaryPathFor(const char* bookPath, char* out, uint32_t cap) {
   snprintf(out, cap, "/.inkling/sum_%08lx.bin", static_cast<unsigned long>(fnv1aPath(bookPath)));
 }
 
+void Library::coverThumbPathFor(const char* bookPath, char* out, uint32_t cap) {
+  snprintf(out, cap, "/.inkling/cov_%08lx.bin", static_cast<unsigned long>(fnv1aPath(bookPath)));
+}
+
+void Library::coverSleepNameFor(const char* bookPath, char* out, uint32_t cap) {
+  snprintf(out, cap, "slp_%08lx.bin", static_cast<unsigned long>(fnv1aPath(bookPath)));
+}
+
 void Library::parseFilenameTitleAuthor(const char* rawStem, char* titleOut, uint32_t titleCap, char* authorOut,
                                        uint32_t authorCap) {
   char work[128];

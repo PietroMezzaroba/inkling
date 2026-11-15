@@ -36,6 +36,8 @@ class Library {
   const Entry& at(int i) const { return entries_[i]; }
 
   static void summaryPathFor(const char* bookPath, char* out, uint32_t cap);
+  static void coverThumbPathFor(const char* bookPath, char* out, uint32_t cap);
+  static void coverSleepNameFor(const char* bookPath, char* out, uint32_t cap);
   static void parseFilenameTitleAuthor(const char* rawStem, char* titleOut, uint32_t titleCap, char* authorOut,
                                        uint32_t authorCap);
 

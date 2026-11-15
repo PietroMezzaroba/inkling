@@ -2,14 +2,19 @@
 
 #include <cstdint>
 
+#include "inkling/Orientation.h"
 #include "inkling/Platform.h"
 
 namespace inkling {
 
+// Stored as a byte in settings.bin: never renumber, only append.
 enum class RotationMode : uint8_t {
-  Auto = 0,       // Accelerometer automatic transposition (0° <-> 180°)
-  LockPortrait,   // Locked to 0° (Standard Portrait)
-  LockInverted,   // Locked to 180° (Upside-down Portrait, buttons at top)
+  Auto = 0,            // accelerometer, vertical only (0° <-> 180°)
+  LockPortrait = 1,    // 0°, keys at the bottom
+  LockInverted = 2,    // 180°, keys at the top
+  LockLandscapeL = 3,  // 90°, keys on the left
+  LockLandscapeR = 4,  // 270°, keys on the right
+  AutoAll = 5,         // accelerometer, all four sides
   Count,
 };
 
@@ -36,10 +41,11 @@ enum class RefreshCadence : uint8_t {
   Count,
 };
 
+// Same numbers as DeskSubWidget.
 enum class DeskWidgetType : uint8_t {
-  GitHubHeatmap = 0,
+  StoicQuote = 0,
   MoonPhase = 1,
-  StoicQuote = 2,
+  ObliqueCard = 2,
   Count,
 };
 
@@ -51,13 +57,18 @@ struct InklingSettings {
   uint32_t magic = kMagic;
   uint8_t version = kVersion;
   RotationMode rotationMode = RotationMode::Auto;
-  bool invertKeysOn180 = true;
+  bool invertKeysOn180 = true;  // keys follow the rotation (all non-0° orientations)
   AutoSleepOption autoSleep = AutoSleepOption::Min5;
   WakeSensitivity wakeSensitivity = WakeSensitivity::Normal;
   RefreshCadence refreshCadence = RefreshCadence::Pages12;
-  DeskWidgetType deskWidget = DeskWidgetType::GitHubHeatmap;
+  DeskWidgetType deskWidget = DeskWidgetType::StoicQuote;
   bool nightMode = false;
   uint8_t reserved[7] = {};
+
+  bool autoRotation() const { return rotationMode == RotationMode::Auto || rotationMode == RotationMode::AutoAll; }
+  bool autoAllowsLandscape() const { return rotationMode == RotationMode::AutoAll; }
+  // The fixed orientation of a Lock* mode; false for the automatic modes.
+  bool lockedOrientation(Orientation& out) const;
 
   unsigned long autoSleepTimeoutMs() const;
   unsigned long wakeHoldMs() const;
@@ -79,6 +90,8 @@ struct InklingSettings {
   void cycleDeskWidget(int delta);
   void toggleNightMode();
 
+  // Reads settings.bin; out-of-range fields (older or corrupt files) fall
+  // back to their defaults one by one instead of discarding the whole file.
   bool load(Storage& storage);
   bool save(Storage& storage) const;
 };

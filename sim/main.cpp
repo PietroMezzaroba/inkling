@@ -35,6 +35,7 @@ struct Canvas {
   std::vector<uint8_t> fb = std::vector<uint8_t>(static_cast<size_t>(kPanelWBytes) * kPanelH, 0xFF);
   freeink::ui::DisplayTarget target{fb.data(), kPanelW, kPanelH, kPanelWBytes};
 
+  // Saves the LOGICAL screen (what the user sees, upright) for any orientation.
   bool save(const std::string& path) const {
     const int outW = target.logicalWidth();
     const int outH = target.logicalHeight();
@@ -42,9 +43,21 @@ struct Canvas {
     for (int y = 0; y < outH; ++y) {
       for (int x = 0; x < outW; ++x) {
         int px = x, py = y;
-        if (outW != kPanelW) {
-          px = y;
-          py = kPanelH - 1 - x;
+        switch (target.orientation()) {
+          case freeink::ui::Orientation::Portrait:
+            px = y;
+            py = kPanelH - 1 - x;
+            break;
+          case freeink::ui::Orientation::PortraitInverted:
+            px = kPanelW - 1 - y;
+            py = x;
+            break;
+          case freeink::ui::Orientation::LandscapeClockwise:
+            px = kPanelW - 1 - x;
+            py = kPanelH - 1 - y;
+            break;
+          case freeink::ui::Orientation::LandscapeCounterClockwise:
+            break;
         }
         const uint8_t byte = fb[static_cast<size_t>(py) * kPanelWBytes + (px >> 3)];
         const bool ink = (byte & (0x80 >> (px & 7))) == 0;
@@ -104,6 +117,7 @@ struct Recorder {
 };
 
 inkling::ReaderMemory readerMemory;
+alignas(16) uint8_t readerIndex[inkling::IndexSizes::kIdeal];
 alignas(16) uint8_t glyphsRegular[inkling::GlyphCacheSizes::kRegularIdeal];
 alignas(16) uint8_t glyphsItalic[inkling::GlyphCacheSizes::kItalic];
 
@@ -130,6 +144,19 @@ void populateSimStatus(inkling::DeviceStatus& status) {
   status.otherFirmware = "inkling-updater (app1)";
 }
 
+// Rotates the simulated panel exactly like the firmware's setAppOrientation().
+struct SimRotator {
+  Canvas* canvas;
+  inkling::UiApp* ui;
+  inkling::InklingApp* app;
+  static void rotate(freeink::ui::Orientation o, void* user) {
+    auto& self = *static_cast<SimRotator*>(user);
+    self.canvas->target.setOrientation(o);
+    self.ui->setDevice(self.canvas->target.deviceContext());
+    self.app->onOrientationChanged(o);
+  }
+};
+
 int runTour(const std::string& cardDir, const std::string& outDir) {
   Fonts fonts;
   if (fonts.notoSerifReg.empty()) {
@@ -137,11 +164,13 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
     return 1;
   }
   sim::HostStorage storage(cardDir);
-  // Start tour on the Home screen by clearing any left-over resume pointer & prefs.
+  // Start on Home with default settings: no resume pointer, prefs or settings.
   storage.writeFile("/.inkling/last.txt", "", 0);
   storage.writeFile("/.inkling/prefs.bin", "", 0);
+  storage.writeFile("/.inkling/settings.bin", "", 0);
 
   inkling::BookReader reader(storage, readerMemory);
+  reader.setIndexBuffer(readerIndex, sizeof(readerIndex));
   fonts.registerAll(reader, glyphsRegular, sizeof(glyphsRegular), glyphsItalic, sizeof(glyphsItalic));
 
   Canvas canvas;
@@ -158,223 +187,145 @@ int runTour(const std::string& cardDir, const std::string& outDir) {
   inkling::InklingApp app(storage, &reader, status, ui, frameFor(canvas));
   Recorder rec{&canvas, outDir, "", 0};
   app.setPresenter(Recorder::present, &rec);
+  SimRotator rotator{&canvas, &ui, &app};
+  app.setOrientationHandler(SimRotator::rotate, &rotator);
 
   using B = inkling::Button;
+  using O = freeink::ui::Orientation;
+  std::string prefix;
   auto step = [&](const char* label, B button) {
-    rec.label = label;
+    rec.label = prefix + label;
     app.onButton(button);
     app.update();
   };
+  auto shot = [&](const char* label) {
+    rec.label = prefix + label;
+    app.update();
+  };
+  auto press = [&](B button, int times) {
+    for (int i = 0; i < times; ++i) app.onButton(button);
+  };
 
-  // 1. Boot into Home Command Center
-  rec.label = "home";
+  rec.label = "p0-home";
   app.begin();
   app.update();
 
-  // 2. Navigate to Library tile on Home Dock and open Visual Library
-  step("home-dock-library", B::Down);
-  step("library", B::Confirm);
-  step("library-down", B::Down);
-  step("library-up", B::Up);
+  // Every screen with a landscape layout, in one orientation.
+  auto menusTour = [&](const char* tag) {
+    prefix = tag;
+    app.showHome();
+    shot("home");
+    step("home-right", B::Right);
+    step("home-down", B::Down);
+    app.showLibrary();
+    shot("library");
+    step("library-down", B::Down);
+    app.showLibrary();
+    app.update();
+    step("reader", B::Confirm);
+    step("reader-next", B::Down);
+    step("menu", B::Confirm);
+    step("menu-down", B::Down);
+    step("toc", B::Confirm);
+    step("toc-down", B::Down);
+    step("toc-jump", B::Confirm);
+    step("menu2", B::Confirm);
+    press(B::Down, 2);
+    step("menu-fontsize", B::Right);
+    step("apply", B::Back);
+    step("menu3", B::Confirm);
+    press(B::Down, 7);
+    step("menu-night", B::Right);
+    step("night-page", B::Back);
+    app.onButton(B::Confirm);
+    press(B::Down, 7);
+    app.onButton(B::Right);
+    app.onButton(B::Back);
+    app.showSettings();
+    shot("settings");
+    press(B::Down, 5);
+    step("settings-scrolled", B::Down);
+    app.showDiagnostic();
+    shot("diagnostic");
+    app.showMessage("Sincronizzazione volume in corso...");
+    shot("message");
+    rec.label = prefix + "lock";
+    ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+    app.update();
+    app.showHome();
+    app.update();
+  };
 
-  // 3. Open first book and turn pages (feeding the Pet)
-  step("open-book", B::Confirm);
-  step("reader-next-1", B::Right);
-  step("reader-next-2", B::Right);
+  menusTour("p0-");
 
-  // 4. Open Floating Reader Overlay Menu over the live book page
-  step("reader-menu-overlay", B::Confirm);
-  step("menu-down-toc", B::Down);  // "Indice dei capitoli"
-  step("toc", B::Confirm);
-  step("toc-down", B::Down);
-  step("toc-jump", B::Confirm);
-
-  // 5. Reopen overlay menu, increase text size in-place, and apply with Back
-  step("menu-again", B::Confirm);
-  step("menu-down-1", B::Down);
-  step("menu-down-size", B::Down);  // "Dimensione Testo"
-  step("bigger-font-live", B::Right);
-  step("apply-layout", B::Back);
-
-  // 6. Close book back to Home (now showing updated progress & Pet stats!)
-  step("back-to-home", B::Back);
-
-  // 7. Test Desk Ambient Mode (Split-Flap Clock, Weather, Mini-Calendar, GitHub Heatmap & Moon Phase)
-  rec.label = "desk-dashboard-heatmap";
+  // Portrait-only screens (always at 0°).
+  prefix = "p0-";
   app.showDeskAmbient();
-  app.update();
+  shot("desk");
+  step("desk-widget", B::Right);
 
-  step("desk-dashboard-moon", B::Right);
-  step("desk-back-home", B::Back);
-
-  // 8. Test L'Oracolo & Oblique Strategies (Daily Stoic & Brian Eno)
-  rec.label = "oracle-daily-stoic";
-  app.showOracle();
-  app.update();
-
-  step("oracle-oblique-strategies", B::Right);
-  app.oracle().onShake();
-  rec.label = "oracle-imu-shake";
-  app.update();
-  step("oracle-back-home", B::Back);
-
-  // 9. Test Micro-RPG La Cripta dei Tomi (Procedural text crawler & combat)
-  rec.label = "rpg-crypt-room";
-  app.showTextRpg();
-  app.update();
-
-  step("rpg-combat-action", B::Confirm);
-  step("rpg-back-home", B::Back);
-
-  // 10. Open Interactive Pet Sanctuary & play Hacker Matrix: Breach!
-  step("home-dock-sanctuary", B::Down);
-  step("pet-sanctuary", B::Confirm);
-  step("pet-feed-crystal", B::Confirm);  // Feed 1 Ink Crystal!
-  step("pet-select-breach", B::Down);
-  step("breach-start", B::Confirm);      // Launch Hacker Matrix: Breach!
-  step("breach-move-up", B::Up);
-  step("breach-move-right", B::Right);
-  step("breach-emp-blast", B::Confirm);  // Fire EMP Wave!
-  step("breach-back-sanctuary", B::Back);
-  step("pet-select-lamp", B::Down);
-  step("pet-night-lamp", B::Confirm);    // Toggle Astral Night Lamp!
-  step("pet-back-home", B::Back);
-
-  // 8. Open System Diagnostics & IMU Radar from Home
-  rec.label = "diagnostic";
-  app.showDiagnostic();
-  app.update();
-
-  // 9. Render Collectible Sleep Poster with live Pet & Book telemetry
-  rec.label = "sleep-poster";
-  ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
-  app.update();
-
-  // 10. Render Futuristic Wi-Fi Cyber-Net & Web Portal Screen
-  inkling::OtaView otaView{};
-  otaView.network = "Vodafone-C33359337";
-  std::snprintf(otaView.address, sizeof(otaView.address), "192.168.1.10");
-  otaView.state = "Daily Ink: ANSA + HackerNews";
-  otaView.version = "v2.0-cyber";
-  otaView.progress = 80;
-  rec.label = "ota-update";
-  ui.setScreen(inkling::otaScreen, &otaView, freeink::ui::RefreshHint::Fast);
-  app.update();
-
-  // 11. Evolve Pet to Final Stage (Arconte Astrale) and render Sanctuary & Sleep Poster
-  inkling::LocalTime evoNow{true, 2026, 11, 2, 18, 25};
-  app.pet().toggleNightLamp(storage);  // switch back to daytime habitat
-  for (int p = 0; p < 520; ++p) {
-    app.pet().onPageRead(storage, evoNow, (p % 25) == 24, false);
+  // Capture the cover page (spine 0, page 0) of each book in portrait.
+  for (int i = 0; i < app.library().count(); ++i) {
+    app.showLibrary();
+    app.update();
+    if (reader.open(app.library().at(i).path, app.currentLayout()) == freeink::book::BookStatus::Ok) {
+      reader.jumpToChapter(0);
+      reader.prepare();
+      rec.label = "cover-book-" + std::to_string(i);
+      ui.setScreen(inkling::InklingApp::readerScreen, &app, freeink::ui::RefreshHint::Full);
+      app.update();
+      rec.label = "lock-book-" + std::to_string(i);
+      ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+      app.update();
+    }
   }
-  rec.label = "evo-archon-sanctuary";
-  app.showPetSanctuary();
+  app.showHome();
   app.update();
 
-  rec.label = "evo-archon-sleep";
-  ui.setScreen(inkling::sleepScreen, &app, freeink::ui::RefreshHint::Full);
+  // Rotation locks from the Settings screen, as a user would do it.
+  auto lockTo = [&](int rightPresses) {
+    app.settings().rotationMode = inkling::RotationMode::Auto;
+    app.showSettings();
+    app.update();
+    press(B::Right, rightPresses);
+    app.update();
+  };
+  lockTo(3);  // Auto -> Auto 4 lati -> 0° -> 90°
+  menusTour("l90-");
+  prefix = "l90-";
+  app.showDeskAmbient();
+  shot("desk-portrait-fallback");
+  app.showHome();
+  shot("home-after-fallback");
+
+  lockTo(5);  // ... -> 180° -> 270°
+  menusTour("l270-");
+
+  lockTo(4);  // 180°
+  menusTour("i180-");
+
+  // Auto 4 lati from the accelerometer, debounced like the firmware loop.
+  prefix = "auto-";
+  app.settings().rotationMode = inkling::RotationMode::AutoAll;
+  app.setDesiredOrientation(O::Portrait);
+  inkling::OrientationTracker tracker;
+  O next;
+  int changes = 0;
+  for (int i = 0; i < 6; ++i) {
+    if (tracker.update(-0.95f, 0.05f, 0.1f, true, app.desiredOrientation(), next)) {
+      app.setDesiredOrientation(next);
+      ++changes;
+    }
+  }
+  shot("tilted");
+  if (changes != 1 || !inkling::isLandscape(app.desiredOrientation())) {
+    std::fprintf(stderr, "orientation tracker: expected one landscape switch, got %d\n", changes);
+    return 1;
+  }
+  app.setDesiredOrientation(O::Portrait);
   app.update();
-
-  // 12. Open "K2. La verità. Storia di un caso." (Walter Bonatti) to showcase narrative prose & Italian accents
-  app.showLibrary();
-  app.update();
-  step("lib-select-1", B::Down);
-  step("lib-select-2", B::Down);
-  step("lib-select-k2", B::Down);
-  step("k2-open", B::Confirm);
-  reader.jumpToChapter(8);
-  reader.prepare();
-  rec.label = "k2-prose-page1";
-  ui.invalidate(freeink::ui::RefreshHint::Full);
-  app.update();
-  step("k2-prose-page2", B::Right);
-  step("k2-prose-page3", B::Right);
-  step("k2-prose-page4", B::Right);
-
-  // 13. Showcase Studio Tipografico: enable Bionic Focus Reading & render page
-  step("k2-studio-open", B::Confirm);
-  step("k2-studio-row1", B::Down);
-  step("k2-studio-row2", B::Down);
-  step("k2-studio-row3", B::Down);
-  step("k2-studio-row4-bionic", B::Down);  // Row 4: Lettura Veloce (Bionic Focus)
-  step("k2-enable-bionic", B::Right);
-  step("k2-bionic-focus-page", B::Back);   // Apply & return to book!
-
-  // 14. Showcase Night Mode (Inversione E-Ink) on Bionic page
-  step("k2-studio-night-open", B::Confirm);
-  for (int i = 0; i < 7; ++i) app.onButton(B::Down);
-  step("k2-enable-night", B::Right);
-  step("k2-night-mode-page", B::Back);
-
-  // 15. Showcase Daily Ink Briefing (Markdown Newspaper with H2/H3 + Blockquote + Bionic Focus)
-  step("k2-studio-day-open", B::Confirm);
-  for (int i = 0; i < 7; ++i) app.onButton(B::Down);
-  step("k2-disable-night", B::Right);
-  step("k2-back-day", B::Back);
-
-  const char* sampleBriefing =
-      "# DAILY INK BRIEFING\n\n"
-      "> Edizione E-Ink del 02/11/2026 ore 21:30 — Generata via Cyber-Net Wi-Fi per Xteink X3.\n\n"
-      "# PRIMA PAGINA ITALIA (ANSA)\n\n"
-      "## 1. Volano a 17 miliardi i ricavi trimestrali di Anthropic\n\n"
-      "La societa' californiana di intelligenza artificiale scalda i motori per lo sbarco dei record al Nasdaq con una crescita esponenziale dei servizi enterprise.\n\n"
-      "## 2. Spazio europeo, nuovo satellite di osservazione terrestre in orbita\n\n"
-      "Lanciato con successo il nuovo modulo ad altissima risoluzione per il monitoraggio climatico del Mediterraneo.\n\n"
-      "# HACKER NEWS // SILICON VALLEY\n\n"
-      "## 1. Egoless Mathematics in the AI Era (terrytao.wordpress.com)\n\n"
-      "## 2. Show HN: Ultra-fast 1-bit E-Ink rendering on ESP32-C3 RISC-V\n\n";
-  storage.writeFile("/Daily Ink Briefing - Redazione Cyber-Net.md", sampleBriefing, std::strlen(sampleBriefing));
-  reader.open("/Daily Ink Briefing - Redazione Cyber-Net.md", app.currentLayout());
-  reader.prepare();
-  rec.label = "daily-ink-briefing";
-  ui.invalidate(freeink::ui::RefreshHint::Full);
-  app.update();
-
-  // 16. Test Settings Studio: Display Auto-Rotation, Rotation Lock, Inverted Keys, Sleep Timer
-  rec.label = "settings-studio";
-  app.showSettings();
-  app.update();
-  step("settings-cycle-rotation", B::Right);  // Switch to Blocco 0°
-  step("settings-down-invert", B::Down);
-  step("settings-cycle-invert", B::Right);    // Toggle key inversion
-  step("settings-down-sleep", B::Down);
-  step("settings-cycle-sleep", B::Right);     // Cycle auto-sleep timer
-  step("settings-back-home", B::Back);        // Save & return to home
 
   app.shutdown();
-  return 0;
-}
-
-int testPetEngine(sim::HostStorage& storage) {
-  storage.mkdirs("/.inkling");
-  storage.mkdirs("/.crosspoint/pet");
-  storage.writeFile("/.inkling/pet.bin", "", 0);
-  // Seed a legacy CrossPet JSON to verify automatic migration
-  const char* legacyJson = R"({"level":3,"xp":240,"totalPagesRead":85,"currentStreak":4,"mood":88,"hunger":90})";
-  storage.writeFile("/.crosspoint/pet/pet.json", legacyJson, std::strlen(legacyJson));
-
-  inkling::PetEngine pet;
-  inkling::LocalTime t0{true, 2026, 11, 2, 10, 0};
-  pet.load(storage, t0);
-  if (pet.state().totalPagesRead < 85 || pet.stage() != inkling::PetStage::Glyph) {
-    std::fprintf(stderr, "PetEngine CrossPet migration failed (pages=%lu, stage=%u)\n",
-                 static_cast<unsigned long>(pet.state().totalPagesRead), static_cast<unsigned>(pet.stage()));
-    return 1;
-  }
-  const uint16_t beforeCrystals = pet.state().inkCrystals;
-  for (int i = 0; i < 10; ++i) pet.onPageRead(storage, t0, i == 9, false);
-  if (pet.state().inkCrystals <= beforeCrystals) {
-    std::fprintf(stderr, "PetEngine crystal reward check failed\n");
-    return 1;
-  }
-  if (!pet.feedInkCrystal(storage)) {
-    std::fprintf(stderr, "PetEngine feedInkCrystal check failed\n");
-    return 1;
-  }
-  // Clean up test files
-  storage.writeFile("/.crosspoint/pet/pet.json", "", 0);
-  storage.writeFile("/.inkling/pet.bin", "", 0);
-  std::printf("OK  PetEngine migration, evolution & crystal economy verified\n");
   return 0;
 }
 
@@ -382,6 +333,7 @@ int runCheck(const std::string& cardDir) {
   Fonts fonts;
   sim::HostStorage storage(cardDir);
   inkling::BookReader reader(storage, readerMemory);
+  reader.setIndexBuffer(readerIndex, sizeof(readerIndex));
   fonts.registerAll(reader, glyphsRegular, sizeof(glyphsRegular), glyphsItalic, sizeof(glyphsItalic));
   Canvas canvas;
   inkling::ui::bindInklingFonts(canvas.target);
@@ -390,25 +342,36 @@ int runCheck(const std::string& cardDir) {
 
   static inkling::Library library;
   library.scan(storage);
-  int failures = testPetEngine(storage);
-  for (int i = 0; i < library.count(); ++i) {
-    inkling::ReaderLayout layout;
-    layout.pageHeight = static_cast<int16_t>(kPanelW - 38);
-    auto st = reader.open(library.at(i).path, layout);
-    uint32_t pages = 0;
-    while (st == freeink::book::BookStatus::Ok) {
-      st = reader.render(frame);
-      ++pages;
-      if (st != freeink::book::BookStatus::Ok || !reader.nextPage()) break;
+  int failures = 0;
+  // Every book from its first page, in portrait and in landscape (page sizes
+  // as InklingApp::currentLayout() makes them).
+  for (int pass = 0; pass < 2; ++pass) {
+    const bool landscape = pass == 1;
+    auto passFrame = frame;
+    passFrame.rotation = landscape ? freeink::book::FrameRotation::None : freeink::book::FrameRotation::Portrait;
+    for (int i = 0; i < library.count(); ++i) {
+      inkling::ReaderLayout layout;
+      layout.pageWidth = landscape ? kPanelW : kPanelH;
+      layout.pageHeight = static_cast<int16_t>((landscape ? kPanelH : kPanelW) - 38);
+      if (landscape) layout.marginH = static_cast<int16_t>(layout.marginH + 28);
+      auto st = reader.open(library.at(i).path, layout);
+      if (st == freeink::book::BookStatus::Ok) reader.jumpToChapter(0);
+      uint32_t pages = 0;
+      while (st == freeink::book::BookStatus::Ok) {
+        st = reader.render(passFrame);
+        ++pages;
+        if (st != freeink::book::BookStatus::Ok || !reader.nextPage()) break;
+      }
+      std::printf("%-3s %-4s %-40.40s %5u pages  %3u%%  %s\n", st == freeink::book::BookStatus::Ok ? "OK" : "ERR",
+                  landscape ? "land" : "port", library.at(i).name, pages, reader.percent(),
+                  freeink::book::bookStatusName(st));
+      if (st != freeink::book::BookStatus::Ok) ++failures;
+      reader.close();
     }
-    std::printf("%-3s %-40.40s %5u pages  %3u%%  %s\n", st == freeink::book::BookStatus::Ok ? "OK" : "ERR",
-                library.at(i).name, pages, reader.percent(), freeink::book::bookStatusName(st));
-    if (st != freeink::book::BookStatus::Ok) ++failures;
-    reader.close();
   }
   std::printf("arena peaks: scratch %zu / %zu, catalog %zu / %zu, index %zu / %zu, parse %zu / %zu bytes\n",
               reader.scratchHighWater(), inkling::ReaderMemory::kScratch, reader.catalogHighWater(),
-              inkling::ReaderMemory::kCatalog, reader.indexHighWater(), inkling::ReaderMemory::kIndex,
+              inkling::ReaderMemory::kCatalog, reader.indexHighWater(), sizeof(readerIndex),
               reader.parseHighWater(), canvas.fb.size());
   return failures ? 1 : 0;
 }

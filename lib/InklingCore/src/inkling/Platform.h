@@ -54,4 +54,11 @@ int32_t dayNumber(uint16_t year, uint8_t month, uint8_t day);
 // Seconds since 1970-01-01 00:00 local time; 0 for an invalid clock.
 uint32_t localEpoch(const LocalTime& t);
 
+// 0 = Monday ... 6 = Sunday.
+int weekdayMondayFirst(uint16_t year, uint8_t month, uint8_t day);
+
+// "Venerdì 6 novembre" (withYear: "Venerdì 6 novembre 2026"); "" for an
+// invalid clock. UTF-8, fits in 40 bytes.
+void formatItalianDate(const LocalTime& t, char* out, uint32_t cap, bool withYear = false);
+
 }  // namespace inkling

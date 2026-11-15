@@ -3,6 +3,8 @@
 #include "Library.h"
 #include "hyph_it.h"
 #include "inkling/text/Nfc.h"
+#include "inkling/ui/CyberCanvas.h"
+#include <render/ImageRenderer.h>
 #include <text/hyph_en_us.h>
 
 #include <cstdio>
@@ -31,10 +33,10 @@ const char* fontFamilyName(uint8_t family) {
 namespace {
 
 constexpr uint32_t kFontFingerprints[kFontFamilyCount] = {
-    0x4E535204u,  // "NSR" v4 (Noto Serif)
-    0x4E534E04u,  // "NSN" v4 (Noto Sans)
-    0x414C4704u,  // "ALG" v4 (Alegreya)
-    0x4F445904u,  // "ODY" v4 (OpenDyslexic)
+    0x4E535205u,  // "NSR" v5 (Noto Serif)
+    0x4E534E05u,  // "NSN" v5 (Noto Sans)
+    0x414C4705u,  // "ALG" v5 (Alegreya)
+    0x4F445905u,  // "ODY" v5 (OpenDyslexic)
 };
 constexpr const char* kCacheRoot = "/.inkling/cache";
 
@@ -77,10 +79,11 @@ constexpr uint32_t kPositionMagic = 0x504B4E49;  // "INKP"
 BookReader::BookReader(Storage& storage, ReaderMemory& memory) : storage_(storage), mem_(memory) {
   catalogArena_.init(mem_.catalog, sizeof(mem_.catalog));
   scratch_.init(mem_.scratch, sizeof(mem_.scratch));
-  index_.init(mem_.index, sizeof(mem_.index));
   hyphIt_.init(freeink::book::k_hyph_it, freeink::book::k_hyph_it_size);
   hyphEn_.init(freeink::book::k_hyph_en_us, freeink::book::k_hyph_en_us_size);
 }
+
+void BookReader::setIndexBuffer(uint8_t* buffer, size_t len) { index_.init(buffer, len); }
 
 bool BookReader::initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen,
                            uint8_t* regularCache, size_t regularCacheLen, uint8_t* italicCache,
@@ -214,6 +217,8 @@ BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
       composeLatinNfc(author_);
     }
     if (meta.language && meta.language[0]) params_.language = meta.language;
+
+    ensureCoverCache();
   }
   if (spineCount_ == 0) return BookStatus::NotEpub;
 
@@ -522,6 +527,343 @@ void BookReader::loadProgress() {
   if (saved.magic != kPositionMagic || saved.spine >= spineCount_) return;
   pos_.spine = saved.spine;
   pos_.charStart = saved.charStart;
+}
+
+namespace {
+
+constexpr uint32_t kSleepCoverMagic = 0x56434B4Au;  // "IKCV" v2
+constexpr uint16_t kSleepCoverMaxW = 440;
+constexpr uint16_t kSleepCoverMaxH = 540;
+
+struct SleepCoverHeader {
+  uint32_t magic;
+  uint16_t width;
+  uint16_t height;
+};
+
+struct ThumbDitherSink {
+  uint8_t* dst;  // kCoverBytes (736 bytes, 64x92, 8 bytes/row)
+  uint16_t offsetX;
+  uint16_t offsetY;
+  int16_t err0[ui::canvas::kCoverW + 4] = {};
+  int16_t err1[ui::canvas::kCoverW + 4] = {};
+  int16_t err2[ui::canvas::kCoverW + 4] = {};
+
+  static bool onRow(void* user, uint16_t y, const uint8_t* gray, uint16_t width) {
+    auto* self = static_cast<ThumbDitherSink*>(user);
+    const uint16_t dy = static_cast<uint16_t>(self->offsetY + y);
+    if (dy >= ui::canvas::kCoverH) return false;
+    uint8_t rowBits[ui::canvas::kCoverW / 8] = {};
+    if (width > ui::canvas::kCoverW) width = ui::canvas::kCoverW;
+    freeink::book::ditherRowAtkinson(gray, width, self->err0, self->err1, self->err2, rowBits);
+    uint8_t* dstRow = self->dst + dy * (ui::canvas::kCoverW / 8);
+    for (uint16_t x = 0; x < width; ++x) {
+      const uint16_t dx = static_cast<uint16_t>(self->offsetX + x);
+      if (dx < ui::canvas::kCoverW && (rowBits[x >> 3] & (0x80u >> (x & 7)))) {
+        dstRow[dx >> 3] |= static_cast<uint8_t>(0x80u >> (dx & 7));
+      }
+    }
+    return true;
+  }
+};
+
+struct StreamCoverSink {
+  freeink::book::CacheStorage* cache;
+  int16_t* err0;
+  int16_t* err1;
+  int16_t* err2;
+  uint16_t maxW;
+
+  static bool onRow(void* user, uint16_t, const uint8_t* gray, uint16_t width) {
+    auto* self = static_cast<StreamCoverSink*>(user);
+    if (width > self->maxW) width = self->maxW;
+    uint8_t rowBits[64] = {};
+    freeink::book::ditherRowAtkinson(gray, width, self->err0, self->err1, self->err2, rowBits);
+    const uint32_t rowBytes = (width + 7u) / 8u;
+    return self->cache->write(rowBits, rowBytes);
+  }
+};
+
+struct DirectTargetSink {
+  freeink::ui::DrawTarget* target;
+  int16_t baseX;
+  int16_t baseY;
+  int16_t* err0;
+  int16_t* err1;
+  int16_t* err2;
+  uint16_t maxW;
+
+  static bool onRow(void* user, uint16_t y, const uint8_t* gray, uint16_t width) {
+    auto* self = static_cast<DirectTargetSink*>(user);
+    if (width > self->maxW) width = self->maxW;
+    uint8_t rowBits[64] = {};
+    freeink::book::ditherRowAtkinson(gray, width, self->err0, self->err1, self->err2, rowBits);
+    freeink::ui::BitmapRef ref{};
+    ref.data = rowBits;
+    ref.width = width;
+    ref.height = 1;
+    ref.format = freeink::ui::BitmapFormat::BW1;
+    self->target->bitmap(
+        freeink::ui::Rect{self->baseX, static_cast<int16_t>(self->baseY + y), static_cast<int16_t>(width), 1},
+        ref, freeink::ui::BitmapMode::Center, freeink::ui::Paint::solid(freeink::ui::Color::Black));
+    return true;
+  }
+};
+
+}  // namespace
+
+bool BookReader::resolveCoverEntry(ZipEntry* out) {
+  if (!source_ || isText_ || !catalog_.isOpen()) return false;
+  scratch_.reset();
+  const bool found = catalog_.findCoverOrFirstImage(*source_, scratch_, out);
+  scratch_.reset();
+  return found;
+}
+
+void BookReader::ensureCoverCache() {
+  if (!source_ || isText_ || !catalog_.isOpen()) return;
+
+  char thumbPath[64];
+  Library::coverThumbPathFor(path_, thumbPath, sizeof(thumbPath));
+  char sleepName[40];
+  Library::coverSleepNameFor(path_, sleepName, sizeof(sleepName));
+
+  uint8_t probeByte = 0;
+  const bool haveThumb = storage_.readFile(thumbPath, &probeByte, 1) > 0;
+  freeink::book::CacheStorage* inkCache = storage_.cacheAt("/.inkling");
+  SleepCoverHeader existingHdr{};
+  const bool haveSleep =
+      inkCache &&
+      inkCache->readAt(sleepName, 0, &existingHdr, sizeof(existingHdr)) ==
+          static_cast<int32_t>(sizeof(existingHdr)) &&
+      existingHdr.magic == kSleepCoverMagic && existingHdr.width > 0 && existingHdr.height > 0;
+
+  // Restore book's own cache directory before touching catalog_ (which shares
+  // the platform's CacheStorage singleton)!
+  cache_ = storage_.cacheAt(cacheDir_);
+  if (haveThumb && haveSleep) {
+    return;
+  }
+
+  ZipEntry coverZip{};
+  if (!resolveCoverEntry(&coverZip)) {
+    return;
+  }
+
+  if (!haveThumb) {
+    uint8_t thumbBits[ui::canvas::kCoverBytes] = {};
+    ThumbDitherSink sink{};
+    sink.dst = thumbBits;
+    scratch_.reset();
+    uint16_t outW = ui::canvas::kCoverW;
+    uint16_t outH = ui::canvas::kCoverH;
+    const BookStatus st = freeink::book::ImageRenderer::renderEntry(
+        *source_, coverZip, ui::canvas::kCoverW, ui::canvas::kCoverH, scratch_,
+        ThumbDitherSink::onRow, &sink, &outW, &outH, /*stretchToBox=*/true);
+    scratch_.reset();
+    if (st == BookStatus::Ok) {
+      storage_.writeFile(thumbPath, thumbBits, sizeof(thumbBits));
+    }
+  }
+
+  if (!haveSleep) {
+    inkCache = storage_.cacheAt("/.inkling");
+    scratch_.reset();
+    const size_t errCap = kSleepCoverMaxW + 4u;
+    int16_t* err0 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err1 = scratch_.allocArray<int16_t>(errCap);
+    int16_t* err2 = scratch_.allocArray<int16_t>(errCap);
+    if (inkCache && err0 && err1 && err2) {
+      uint16_t outW = 0, outH = 0;
+      struct ProbeOnly {
+        static bool stopRow(void*, uint16_t, const uint8_t*, uint16_t) { return false; }
+      };
+      freeink::book::ImageRenderer::renderEntry(*source_, coverZip, kSleepCoverMaxW,
+                                                kSleepCoverMaxH, scratch_, ProbeOnly::stopRow,
+                                                nullptr, &outW, &outH, false);
+      if (outW > 0 && outH > 0 && inkCache->beginWrite(sleepName)) {
+        const SleepCoverHeader hdr{kSleepCoverMagic, outW, outH};
+        inkCache->write(&hdr, sizeof(hdr));
+        memset(err0, 0, errCap * sizeof(int16_t));
+        memset(err1, 0, errCap * sizeof(int16_t));
+        memset(err2, 0, errCap * sizeof(int16_t));
+        StreamCoverSink sink{inkCache, err0, err1, err2, kSleepCoverMaxW};
+        const BookStatus st = freeink::book::ImageRenderer::renderEntry(
+            *source_, coverZip, kSleepCoverMaxW, kSleepCoverMaxH, scratch_,
+            StreamCoverSink::onRow, &sink, &outW, &outH, false);
+        if (!inkCache->endWrite() || st != BookStatus::Ok) {
+          inkCache->remove(sleepName);
+        }
+      }
+    }
+    scratch_.reset();
+  }
+
+  // Restore cache_ pointer to the book's own cache directory!
+  cache_ = storage_.cacheAt(cacheDir_);
+}
+
+void BookReader::precacheLibrary(Library& library) {
+  if (open_) return;
+  storage_.mkdirs("/.inkling");
+  bool updatedSummaries = false;
+  ReaderLayout defaultLayout;
+  for (int i = 0; i < library.count(); ++i) {
+    const auto& entry = library.at(i);
+    if (endsWithNoCase(entry.path, ".txt") || endsWithNoCase(entry.path, ".md")) continue;
+
+    char thumbPath[64];
+    Library::coverThumbPathFor(entry.path, thumbPath, sizeof(thumbPath));
+    char sumPath[64];
+    Library::summaryPathFor(entry.path, sumPath, sizeof(sumPath));
+    uint8_t dummy = 0;
+    const bool hasThumb = storage_.readFile(thumbPath, &dummy, 1) > 0;
+    const bool hasSum = storage_.readFile(sumPath, &dummy, 1) > 0;
+    if (hasThumb && hasSum) continue;
+
+    if (open(entry.path, defaultLayout) == BookStatus::Ok) {
+      if (!hasSum) {
+        BookSummaryRecord sum{};
+        sum.progressPct = 0;
+        sum.started = 0;
+        sum.spine = 0;
+        sum.spineCount = spineCount_;
+        snprintf(sum.title, sizeof(sum.title), "%s", title_);
+        snprintf(sum.author, sizeof(sum.author), "%s", author_);
+        storage_.writeFile(sumPath, &sum, sizeof(sum));
+        updatedSummaries = true;
+      }
+      // Close without marking `started = 1` if it wasn't started before!
+      if (source_) storage_.closeBook();
+      open_ = false;
+      source_ = nullptr;
+      cache_ = nullptr;
+      loadedSpine_ = -1;
+    }
+  }
+  if (updatedSummaries) {
+    library.refreshSummaries(storage_);
+  }
+}
+
+bool BookReader::drawCoverInBox(freeink::ui::DrawTarget& t, const char* bookPath,
+                                freeink::ui::Rect box) {
+  if (!bookPath || !bookPath[0] || box.width < 32 || box.height < 32) return false;
+  if (endsWithNoCase(bookPath, ".txt") || endsWithNoCase(bookPath, ".md")) return false;
+
+  char sleepName[40];
+  Library::coverSleepNameFor(bookPath, sleepName, sizeof(sleepName));
+  freeink::book::CacheStorage* inkCache = storage_.cacheAt("/.inkling");
+  SleepCoverHeader hdr{};
+  const bool cachedOk =
+      inkCache &&
+      inkCache->readAt(sleepName, 0, &hdr, sizeof(hdr)) == static_cast<int32_t>(sizeof(hdr)) &&
+      hdr.magic == kSleepCoverMagic && hdr.width > 0 && hdr.height > 0 &&
+      hdr.width <= kSleepCoverMaxW && hdr.height <= kSleepCoverMaxH;
+
+  // Case 1: The cached 1:1 Atkinson bitmap fits directly inside `box` (Portrait lock screen).
+  if (cachedOk && hdr.width <= box.width - 8 && hdr.height <= box.height - 8) {
+    const int16_t drawW = static_cast<int16_t>(hdr.width);
+    const int16_t drawH = static_cast<int16_t>(hdr.height);
+    const int16_t drawX = static_cast<int16_t>(box.x + (box.width - drawW) / 2);
+    const int16_t drawY = static_cast<int16_t>(box.y + (box.height - drawH) / 2);
+
+    const freeink::ui::Rect frameRect{static_cast<int16_t>(drawX - 4), static_cast<int16_t>(drawY - 4),
+                                      static_cast<int16_t>(drawW + 8), static_cast<int16_t>(drawH + 8)};
+    ui::canvas::fastFill(
+        t, freeink::ui::Rect{static_cast<int16_t>(frameRect.x + 5), static_cast<int16_t>(frameRect.y + 5),
+                             frameRect.width, frameRect.height},
+        freeink::ui::Paint::solid(freeink::ui::Color::Black), 6);
+    ui::canvas::fastFill(t, frameRect, freeink::ui::Paint::solid(freeink::ui::Color::White), 6);
+
+    const uint32_t rowBytes = (hdr.width + 7u) / 8u;
+    constexpr uint16_t kChunkRows = 32;
+    uint8_t chunk[kChunkRows * 64];
+    uint32_t fileOff = sizeof(SleepCoverHeader);
+    for (uint16_t ry = 0; ry < hdr.height; ry += kChunkRows) {
+      const uint16_t rows = (hdr.height - ry < kChunkRows) ? (hdr.height - ry) : kChunkRows;
+      const uint32_t bytes = rows * rowBytes;
+      if (inkCache->readAt(sleepName, fileOff, chunk, bytes) != static_cast<int32_t>(bytes)) break;
+      fileOff += bytes;
+      freeink::ui::BitmapRef ref{};
+      ref.data = chunk;
+      ref.width = hdr.width;
+      ref.height = rows;
+      ref.format = freeink::ui::BitmapFormat::BW1;
+      t.bitmap(freeink::ui::Rect{drawX, static_cast<int16_t>(drawY + ry), drawW, static_cast<int16_t>(rows)},
+               ref, freeink::ui::BitmapMode::Center,
+               freeink::ui::Paint::solid(freeink::ui::Color::Black));
+    }
+    ui::canvas::fastStroke(t, frameRect, freeink::ui::Paint::solid(freeink::ui::Color::Black), 2, 6);
+    if (open_) cache_ = storage_.cacheAt(cacheDir_);
+    return true;
+  }
+
+  // Case 2: Live 1:1 decode fitted to `box` (e.g. Landscape lock screen where box is smaller).
+  const bool wasOpen = open_;
+  if (!wasOpen) {
+    ReaderLayout layout;
+    if (open(bookPath, layout) != BookStatus::Ok) return false;
+  } else {
+    cache_ = storage_.cacheAt(cacheDir_);
+  }
+  ZipEntry coverZip{};
+  if (!resolveCoverEntry(&coverZip)) {
+    if (!wasOpen) close();
+    return false;
+  }
+
+  const uint16_t maxW = static_cast<uint16_t>(box.width - 12);
+  const uint16_t maxH = static_cast<uint16_t>(box.height - 12);
+  uint16_t outW = 0, outH = 0;
+  struct ProbeOnly {
+    static bool stopRow(void*, uint16_t, const uint8_t*, uint16_t) { return false; }
+  };
+  scratch_.reset();
+  freeink::book::ImageRenderer::renderEntry(*source_, coverZip, maxW, maxH, scratch_,
+                                            ProbeOnly::stopRow, nullptr, &outW, &outH, false);
+  scratch_.reset();
+  if (outW == 0 || outH == 0) {
+    if (!wasOpen) close();
+    return false;
+  }
+
+  const int16_t drawX = static_cast<int16_t>(box.x + (box.width - outW) / 2);
+  const int16_t drawY = static_cast<int16_t>(box.y + (box.height - outH) / 2);
+  const freeink::ui::Rect frameRect{static_cast<int16_t>(drawX - 4), static_cast<int16_t>(drawY - 4),
+                                    static_cast<int16_t>(outW + 8), static_cast<int16_t>(outH + 8)};
+  ui::canvas::fastFill(
+      t, freeink::ui::Rect{static_cast<int16_t>(frameRect.x + 5), static_cast<int16_t>(frameRect.y + 5),
+                           frameRect.width, frameRect.height},
+      freeink::ui::Paint::solid(freeink::ui::Color::Black), 6);
+  ui::canvas::fastFill(t, frameRect, freeink::ui::Paint::solid(freeink::ui::Color::White), 6);
+
+  const size_t errCap = outW + 4u;
+  int16_t* err0 = scratch_.allocArray<int16_t>(errCap);
+  int16_t* err1 = scratch_.allocArray<int16_t>(errCap);
+  int16_t* err2 = scratch_.allocArray<int16_t>(errCap);
+  bool ok = false;
+  if (err0 && err1 && err2) {
+    memset(err0, 0, errCap * sizeof(int16_t));
+    memset(err1, 0, errCap * sizeof(int16_t));
+    memset(err2, 0, errCap * sizeof(int16_t));
+    DirectTargetSink sink{&t, drawX, drawY, err0, err1, err2, outW};
+    ok = freeink::book::ImageRenderer::renderEntry(*source_, coverZip, maxW, maxH, scratch_,
+                                                   DirectTargetSink::onRow, &sink, nullptr,
+                                                   nullptr, false) == BookStatus::Ok;
+  }
+  scratch_.reset();
+  ui::canvas::fastStroke(t, frameRect, freeink::ui::Paint::solid(freeink::ui::Color::Black), 2, 6);
+  if (!wasOpen) {
+    if (source_) storage_.closeBook();
+    open_ = false;
+    source_ = nullptr;
+    cache_ = nullptr;
+    loadedSpine_ = -1;
+  } else {
+    cache_ = storage_.cacheAt(cacheDir_);
+  }
+  return ok;
 }
 
 }  // namespace inkling

@@ -2,6 +2,7 @@
 
 #include <BookArena.h>
 #include <BookCatalog.h>
+#include <FreeInkUICore.h>
 #include <cache/PageCache.h>
 #include <layout/ChapterLayout.h>
 #include <render/PageRenderer.h>
@@ -14,6 +15,8 @@
 #include "inkling/Platform.h"
 
 namespace inkling {
+
+class Library;
 
 enum class FontFamily : uint8_t {
   NotoSerif = 0,
@@ -31,11 +34,20 @@ const char* fontFamilyName(uint8_t family);
 struct ReaderMemory {
   static constexpr size_t kCatalog = 18 * 1024;  // resident catalog tables
   static constexpr size_t kScratch = 52 * 1024;  // layout state, catalog tables, page decode
-  static constexpr size_t kIndex = 8 * 1024;     // chapter page index (8 B/page): chapters up to ~1,000 pages
 
   alignas(16) uint8_t catalog[kCatalog];
   alignas(16) uint8_t scratch[kScratch];
-  alignas(16) uint8_t index[kIndex];
+};
+
+// The chapter page index (8 B/page) is a separate block, set with
+// BookReader::setIndexBuffer(), so the platform can take it from what is left
+// after the glyph caches instead of growing the big contiguous ReaderMemory
+// block (on the X3 that block is the one that decides the glyph cache size).
+// 8 KB (~1,000 pages per chapter) was too small: Hacklog's chapter 2 has
+// 1,100+ pages at 42 px and failed with IoError.
+struct IndexSizes {
+  static constexpr size_t kMin = 8 * 1024;     // ~1,000 pages per chapter
+  static constexpr size_t kIdeal = 16 * 1024;  // ~2,000 pages per chapter
 };
 
 // Glyph caches live outside ReaderMemory so the platform can size them from
@@ -75,6 +87,9 @@ class BookReader {
   using BookStatus = freeink::book::BookStatus;
 
   BookReader(Storage& storage, ReaderMemory& memory);
+
+  // Required before open(): the chapter page index arena (see IndexSizes).
+  void setIndexBuffer(uint8_t* buffer, size_t len);
 
   bool initFonts(const uint8_t* regular, uint32_t regularLen, const uint8_t* italic, uint32_t italicLen,
                  uint8_t* regularCache, size_t regularCacheLen, uint8_t* italicCache, size_t italicCacheLen);
@@ -125,6 +140,15 @@ class BookReader {
   size_t indexHighWater() const { return index_.highWater(); }
   size_t parseHighWater() const { return parse_.highWater(); }
 
+  // Ensures every EPUB in `library` has its 64x92 thumbnail (cov_<hash>.bin),
+  // lock-screen cover (slp_<hash>.bin), and metadata summary (sum_<hash>.bin).
+  void precacheLibrary(Library& library);
+
+  // Renders the book's cover centered inside `box` (with frame & shadow) using
+  // the cached 1-bit Atkinson bitmap (or live 1:1 decode when `box` is smaller).
+  // Returns true if a real cover was drawn.
+  bool drawCoverInBox(freeink::ui::DrawTarget& t, const char* bookPath, freeink::ui::Rect box);
+
  private:
   struct FontPair {
     const uint8_t* regular = nullptr;
@@ -138,6 +162,8 @@ class BookReader {
   BookStatus layoutChapter(const char* cacheName);
   void saveProgress(bool forceSummary = false);
   void loadProgress();
+  bool resolveCoverEntry(freeink::book::ZipEntry* out);
+  void ensureCoverCache();
 
   Storage& storage_;
   ReaderMemory& mem_;

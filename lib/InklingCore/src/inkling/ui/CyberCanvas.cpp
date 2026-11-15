@@ -26,91 +26,171 @@ int16_t isqrt32(int32_t n) {
   return static_cast<int16_t>(x);
 }
 
-uint8_t ditherInkMask(int16_t x, uint8_t threshold, bool inverted = false) {
-  static constexpr uint8_t kBayer[4][4] = {
-      {0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
-  const int xm = x & 3;
+// ---------------------------------------------------------------------------
+// Orientation-generic span blitter.
+//
+// Logical (x, y) -> panel (px, py), identical to FreeInkUI's DisplayTarget:
+//   Portrait                  (0°)   px = y,          py = ph-1-x
+//   PortraitInverted          (180°) px = pw-1-y,     py = x
+//   LandscapeClockwise        (90°)  px = pw-1-x,     py = ph-1-y
+//   LandscapeCounterClockwise (270°) px = x,          py = y   (panel native)
+//
+// In the portrait pair a logical COLUMN is a contiguous run of a panel row; in
+// the landscape pair a logical ROW is. Filled shapes are swept along whichever
+// logical axis gives contiguous runs, so every orientation gets byte/memset
+// speed. The other axis falls back to one bit per panel row (only used for
+// thin features: circles, 1 px lines).
+// ---------------------------------------------------------------------------
+
+bool isPortraitOrient() {
+  return g_orientation == freeink::ui::Orientation::Portrait ||
+         g_orientation == freeink::ui::Orientation::PortraitInverted;
+}
+
+int16_t logicalW() { return isPortraitOrient() ? g_ph : g_pw; }
+int16_t logicalH() { return isPortraitOrient() ? g_pw : g_ph; }
+
+constexpr uint8_t kBayer[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+uint8_t ditherThreshold(Color c) {
+  switch (c) {
+    case Color::DarkGray:
+      return 12;
+    case Color::LightGray:
+      return 4;
+    default:
+      return 8;  // Gray / anything else: 50 %
+  }
+}
+
+// Ink bits of one panel byte (8 pixels) on panel row `py` for a Bayer threshold.
+// The 4x4 matrix repeats twice per byte, so the mask only depends on the row.
+uint8_t panelInkMask(int16_t py, uint8_t threshold) {
+  const uint8_t* row = kBayer[py & 3];
   uint8_t m = 0;
-  for (int k = 0; k < 4; ++k) {
-    if (kBayer[k][xm] < threshold) {
-      if (inverted) {
-        const int bitPos = 3 - k;
-        m = static_cast<uint8_t>(m | (0x80u >> bitPos) | (0x08u >> bitPos));
-      } else {
-        m = static_cast<uint8_t>(m | (0x80u >> k) | (0x08u >> k));
-      }
-    }
+  for (int b = 0; b < 8; ++b) {
+    if (row[b & 3] < threshold) m = static_cast<uint8_t>(m | (0x80u >> b));
   }
   return m;
 }
 
-// Fills logical vertical span y in [y0, y1) at column x directly in the portrait framebuffer.
-// In Portrait mode (px = y, py = g_ph - 1 - x), a vertical span in logical space is a
-// contiguous horizontal byte range in row `py` of `g_fb`!
-// In PortraitInverted mode (px = (g_pw - 1) - y, py = x), a vertical span in logical space is a
-// contiguous horizontal byte range in row `py = x` of `g_fb`!
-void fillSpanY(int16_t x, int16_t y0, int16_t y1, Color color) {
-  if (!g_fb || color == Color::Transparent) return;
-  if (x < 0 || x >= kScreenW) return;
-  if (y0 < 0) y0 = 0;
-  if (y1 > kScreenH) y1 = kScreenH;
-  if (y0 >= y1) return;
-
-  uint8_t* row = nullptr;
-  int16_t b0 = 0;
-  int16_t b1 = 0;
-  uint8_t m0 = 0;
-  uint8_t m1 = 0;
-
-  if (g_orientation == freeink::ui::Orientation::PortraitInverted) {
-    row = g_fb + static_cast<int32_t>(x) * g_pwb;
-    const int16_t px0 = static_cast<int16_t>((g_pw - 1) - (y1 - 1));
-    const int16_t px1 = static_cast<int16_t>((g_pw - 1) - y0);
-    b0 = static_cast<int16_t>(px0 >> 3);
-    b1 = static_cast<int16_t>(px1 >> 3);
-    m0 = static_cast<uint8_t>(0xFFu >> (px0 & 7));
-    m1 = static_cast<uint8_t>(0xFFu << (7 - (px1 & 7)));
-  } else {
-    row = g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb;
-    b0 = static_cast<int16_t>(y0 >> 3);
-    b1 = static_cast<int16_t>((y1 - 1) >> 3);
-    m0 = static_cast<uint8_t>(0xFFu >> (y0 & 7));
-    m1 = static_cast<uint8_t>(0xFFu << (7 - ((y1 - 1) & 7)));
+// Contiguous run [px0, px1) on panel row `py`.
+void panelRun(int16_t py, int16_t px0, int16_t px1, Color color) {
+  if (py < 0 || py >= g_ph) return;
+  if (px0 < 0) px0 = 0;
+  if (px1 > g_pw) px1 = g_pw;
+  if (px0 >= px1) return;
+  uint8_t* const row = g_fb + static_cast<int32_t>(py) * g_pwb;
+  const int16_t b0 = static_cast<int16_t>(px0 >> 3);
+  const int16_t b1 = static_cast<int16_t>((px1 - 1) >> 3);
+  uint8_t m0 = static_cast<uint8_t>(0xFFu >> (px0 & 7));
+  uint8_t m1 = static_cast<uint8_t>(0xFFu << (7 - ((px1 - 1) & 7)));
+  if (b0 == b1) {
+    m0 = static_cast<uint8_t>(m0 & m1);
   }
 
   if (color == Color::Black) {
-    if (b0 == b1) {
-      row[b0] = static_cast<uint8_t>(row[b0] & ~(m0 & m1));
-    } else {
-      row[b0] = static_cast<uint8_t>(row[b0] & ~m0);
+    row[b0] = static_cast<uint8_t>(row[b0] & ~m0);
+    if (b0 != b1) {
       if (b1 - b0 > 1) memset(row + b0 + 1, 0x00, static_cast<size_t>(b1 - b0 - 1));
       row[b1] = static_cast<uint8_t>(row[b1] & ~m1);
     }
-  } else if (color == Color::White) {
-    if (b0 == b1) {
-      row[b0] = static_cast<uint8_t>(row[b0] | (m0 & m1));
-    } else {
-      row[b0] = static_cast<uint8_t>(row[b0] | m0);
+    return;
+  }
+  if (color == Color::White) {
+    row[b0] = static_cast<uint8_t>(row[b0] | m0);
+    if (b0 != b1) {
       if (b1 - b0 > 1) memset(row + b0 + 1, 0xFF, static_cast<size_t>(b1 - b0 - 1));
       row[b1] = static_cast<uint8_t>(row[b1] | m1);
     }
+    return;
+  }
+  // Dithered gray: ink only, the background shows through (same as DisplayTarget).
+  const uint8_t ink = panelInkMask(py, ditherThreshold(color));
+  if (ink == 0) return;
+  row[b0] = static_cast<uint8_t>(row[b0] & ~(m0 & ink));
+  if (b0 != b1) {
+    const uint8_t keep = static_cast<uint8_t>(~ink);
+    for (int16_t b = static_cast<int16_t>(b0 + 1); b < b1; ++b) row[b] = static_cast<uint8_t>(row[b] & keep);
+    row[b1] = static_cast<uint8_t>(row[b1] & ~(m1 & ink));
+  }
+}
+
+// One-pixel-wide column [py0, py1) at panel x `px` (one bit per row).
+void panelCol(int16_t px, int16_t py0, int16_t py1, Color color) {
+  if (px < 0 || px >= g_pw) return;
+  if (py0 < 0) py0 = 0;
+  if (py1 > g_ph) py1 = g_ph;
+  if (py0 >= py1) return;
+  const uint8_t bit = static_cast<uint8_t>(0x80u >> (px & 7));
+  uint8_t* p = g_fb + static_cast<int32_t>(py0) * g_pwb + (px >> 3);
+  if (color == Color::Black) {
+    for (int16_t y = py0; y < py1; ++y, p += g_pwb) *p = static_cast<uint8_t>(*p & ~bit);
+  } else if (color == Color::White) {
+    for (int16_t y = py0; y < py1; ++y, p += g_pwb) *p = static_cast<uint8_t>(*p | bit);
   } else {
-    const uint8_t ink = ditherInkMask(x, color == Color::DarkGray ? 12 : 4,
-                                      g_orientation == freeink::ui::Orientation::PortraitInverted);
-    if (ink == 0) return;
-    if (b0 == b1) {
-      row[b0] = static_cast<uint8_t>(row[b0] & ~(m0 & m1 & ink));
-    } else {
-      row[b0] = static_cast<uint8_t>(row[b0] & ~(m0 & ink));
-      const uint8_t keep = static_cast<uint8_t>(~ink);
-      for (int16_t b = static_cast<int16_t>(b0 + 1); b < b1; ++b) {
-        row[b] = static_cast<uint8_t>(row[b] & keep);
-      }
-      row[b1] = static_cast<uint8_t>(row[b1] & ~(m1 & ink));
+    const uint8_t thr = ditherThreshold(color);
+    for (int16_t y = py0; y < py1; ++y, p += g_pwb) {
+      if (kBayer[y & 3][px & 3] < thr) *p = static_cast<uint8_t>(*p & ~bit);
     }
   }
 }
 
+// Logical vertical span y in [y0, y1) at column x.
+void fillSpanY(int16_t x, int16_t y0, int16_t y1, Color color) {
+  if (!g_fb || color == Color::Transparent) return;
+  const int16_t lw = logicalW();
+  const int16_t lh = logicalH();
+  if (x < 0 || x >= lw) return;
+  if (y0 < 0) y0 = 0;
+  if (y1 > lh) y1 = lh;
+  if (y0 >= y1) return;
+  switch (g_orientation) {
+    case freeink::ui::Orientation::Portrait:
+      panelRun(static_cast<int16_t>(g_ph - 1 - x), y0, y1, color);
+      break;
+    case freeink::ui::Orientation::PortraitInverted:
+      panelRun(x, static_cast<int16_t>(g_pw - y1), static_cast<int16_t>(g_pw - y0), color);
+      break;
+    case freeink::ui::Orientation::LandscapeClockwise:
+      panelCol(static_cast<int16_t>(g_pw - 1 - x), static_cast<int16_t>(g_ph - y1), static_cast<int16_t>(g_ph - y0),
+               color);
+      break;
+    case freeink::ui::Orientation::LandscapeCounterClockwise:
+    default:
+      panelCol(x, y0, y1, color);
+      break;
+  }
+}
+
+// Logical horizontal span x in [x0, x1) on row y.
+void fillSpanX(int16_t y, int16_t x0, int16_t x1, Color color) {
+  if (!g_fb || color == Color::Transparent) return;
+  const int16_t lw = logicalW();
+  const int16_t lh = logicalH();
+  if (y < 0 || y >= lh) return;
+  if (x0 < 0) x0 = 0;
+  if (x1 > lw) x1 = lw;
+  if (x0 >= x1) return;
+  switch (g_orientation) {
+    case freeink::ui::Orientation::Portrait:
+      panelCol(y, static_cast<int16_t>(g_ph - x1), static_cast<int16_t>(g_ph - x0), color);
+      break;
+    case freeink::ui::Orientation::PortraitInverted:
+      panelCol(static_cast<int16_t>(g_pw - 1 - y), x0, x1, color);
+      break;
+    case freeink::ui::Orientation::LandscapeClockwise:
+      panelRun(static_cast<int16_t>(g_ph - 1 - y), static_cast<int16_t>(g_pw - x1), static_cast<int16_t>(g_pw - x0),
+               color);
+      break;
+    case freeink::ui::Orientation::LandscapeCounterClockwise:
+    default:
+      panelRun(y, x0, x1, color);
+      break;
+  }
+}
+
+// Clips a rounded rectangle to its span at column x (portrait sweep).
 void roundedSpanAtX(const Rect& rect, int16_t r, int16_t x, int16_t& y0, int16_t& y1) {
   y0 = rect.y;
   y1 = rect.bottom();
@@ -132,6 +212,31 @@ void roundedSpanAtX(const Rect& rect, int16_t r, int16_t x, int16_t& y0, int16_t
     const int16_t inset = static_cast<int16_t>(r - maxDy);
     y0 = static_cast<int16_t>(rect.y + inset);
     y1 = static_cast<int16_t>(rect.bottom() - inset);
+  }
+}
+
+// Same, transposed: span of row y (landscape sweep).
+void roundedSpanAtY(const Rect& rect, int16_t r, int16_t y, int16_t& x0, int16_t& x1) {
+  const Rect t{rect.y, rect.x, rect.height, rect.width};
+  roundedSpanAtX(t, r, y, x0, x1);
+}
+
+// Fills the rounded rect `r` with `color` sweeping the contiguous axis.
+void sweepFill(const Rect& r, int16_t radius, Color color) {
+  if (isPortraitOrient()) {
+    const int16_t xEnd = r.right();
+    for (int16_t x = r.x; x < xEnd; ++x) {
+      int16_t y0, y1;
+      roundedSpanAtX(r, radius, x, y0, y1);
+      if (y0 < y1) fillSpanY(x, y0, y1, color);
+    }
+  } else {
+    const int16_t yEnd = r.bottom();
+    for (int16_t y = r.y; y < yEnd; ++y) {
+      int16_t x0, x1;
+      roundedSpanAtY(r, radius, y, x0, x1);
+      if (x0 < x1) fillSpanX(y, x0, x1, color);
+    }
   }
 }
 
@@ -171,10 +276,6 @@ void plotPx(DrawTarget& t, int16_t x, int16_t y, Color c) {
   t.fill(Rect{x, y, 1, 1}, Paint::solid(c));
 }
 
-void plotBlock(DrawTarget& t, int16_t x, int16_t y, int16_t s, Color c) {
-  fastFill(t, Rect{x, y, s, s}, Paint::solid(c));
-}
-
 void drawStar4(DrawTarget& t, int16_t cx, int16_t cy, int16_t arm, Color c) {
   fastFill(t, Rect{static_cast<int16_t>(cx - arm), cy, static_cast<int16_t>(arm * 2 + 1), 1}, Paint::solid(c));
   fastFill(t, Rect{cx, static_cast<int16_t>(cy - arm), 1, static_cast<int16_t>(arm * 2 + 1)}, Paint::solid(c));
@@ -197,52 +298,6 @@ void drawDiamond(DrawTarget& t, int16_t cx, int16_t cy, int16_t r, Color c) {
   }
 }
 
-void drawEyes(DrawTarget& t, int16_t cx, int16_t cy, int16_t sep, int16_t scale, PetMood mood, uint8_t animFrame,
-              Color fg, Color bg) {
-  const int16_t lx = static_cast<int16_t>(cx - sep);
-  const int16_t rx = static_cast<int16_t>(cx + sep);
-
-  if (mood == PetMood::Sleepy || mood == PetMood::Dormant) {
-    // Closed curved sleeping eyelids "-  -"
-    fastFill(t, Rect{static_cast<int16_t>(lx - 3 * scale), cy, static_cast<int16_t>(6 * scale), scale},
-             Paint::solid(bg));
-    fastFill(t, Rect{static_cast<int16_t>(rx - 3 * scale), cy, static_cast<int16_t>(6 * scale), scale},
-             Paint::solid(bg));
-    fastFill(t,
-             Rect{static_cast<int16_t>(lx - 2 * scale), static_cast<int16_t>(cy + scale),
-                  static_cast<int16_t>(4 * scale), scale},
-             Paint::solid(bg));
-    fastFill(t,
-             Rect{static_cast<int16_t>(rx - 2 * scale), static_cast<int16_t>(cy + scale),
-                  static_cast<int16_t>(4 * scale), scale},
-             Paint::solid(bg));
-    return;
-  }
-
-  if (mood == PetMood::Radiant && (animFrame & 1) == 1) {
-    // Happy joyful "^  ^" eyes!
-    for (int side = 0; side < 2; ++side) {
-      const int16_t ex = side == 0 ? lx : rx;
-      t.line(Point{static_cast<int16_t>(ex - 3 * scale), static_cast<int16_t>(cy + scale)},
-             Point{ex, static_cast<int16_t>(cy - 2 * scale)}, static_cast<uint8_t>(scale), Paint::solid(bg));
-      t.line(Point{ex, static_cast<int16_t>(cy - 2 * scale)},
-             Point{static_cast<int16_t>(ex + 3 * scale), static_cast<int16_t>(cy + scale)}, static_cast<uint8_t>(scale),
-             Paint::solid(bg));
-    }
-    return;
-  }
-
-  // Luminous big eyes with catchlight spark!
-  const int16_t ew = static_cast<int16_t>(3 * scale);
-  fillCircle(t, lx, cy, ew, bg);
-  fillCircle(t, rx, cy, ew, bg);
-  // Inner pupil + white catchlight
-  fillCircle(t, lx, cy, static_cast<int16_t>(scale + 1), fg);
-  fillCircle(t, rx, cy, static_cast<int16_t>(scale + 1), fg);
-  plotBlock(t, static_cast<int16_t>(lx - scale), static_cast<int16_t>(cy - scale), scale, bg);
-  plotBlock(t, static_cast<int16_t>(rx - scale), static_cast<int16_t>(cy - scale), scale, bg);
-}
-
 }  // namespace
 
 void bindFramebuffer(uint8_t* fb, int16_t panelWidth, int16_t panelHeight, int16_t panelWidthBytes) {
@@ -258,6 +313,11 @@ void setCanvasOrientation(freeink::ui::Orientation orient) {
 
 freeink::ui::Orientation canvasOrientation() {
   return g_orientation;
+}
+
+int16_t screenW() { return logicalW(); }
+int16_t screenH() { return logicalH(); }
+bool isLandscape() { return !isPortraitOrient();
 }
 
 void clearScreen() {
@@ -281,11 +341,14 @@ void invertScreen() {
 void clearBandY(int16_t y0, int16_t y1) {
   if (!g_fb) return;
   if (y0 < 0) y0 = 0;
-  if (y1 > kScreenH) y1 = kScreenH;
+  if (y1 > logicalH()) y1 = logicalH();
   if (y0 >= y1) return;
-  for (int16_t x = 0; x < kScreenW; ++x) {
-    fillSpanY(x, y0, y1, Color::White);
-  }
+  sweepFill(Rect{0, y0, logicalW(), static_cast<int16_t>(y1 - y0)}, 0, Color::White);
+}
+
+void clearRect(Rect r) {
+  if (!g_fb || r.empty()) return;
+  sweepFill(r, 0, Color::White);
 }
 
 void fastFill(DrawTarget& t, Rect r, Paint paint, uint8_t radius) {
@@ -294,12 +357,7 @@ void fastFill(DrawTarget& t, Rect r, Paint paint, uint8_t radius) {
     t.fill(r, paint, radius);
     return;
   }
-  const int16_t xEnd = r.right();
-  for (int16_t x = r.x; x < xEnd; ++x) {
-    int16_t y0, y1;
-    roundedSpanAtX(r, radius, x, y0, y1);
-    if (y0 < y1) fillSpanY(x, y0, y1, paint.color);
-  }
+  sweepFill(r, radius, paint.color);
 }
 
 void fastStroke(DrawTarget& t, Rect r, Paint paint, uint8_t width, uint8_t radius) {
@@ -308,23 +366,44 @@ void fastStroke(DrawTarget& t, Rect r, Paint paint, uint8_t width, uint8_t radiu
     t.stroke(r, paint, width, radius);
     return;
   }
+  const Color c = paint.color;
   const Rect inner = r.inset(freeink::ui::Insets{static_cast<int16_t>(width), static_cast<int16_t>(width),
                                                  static_cast<int16_t>(width), static_cast<int16_t>(width)});
-  const int16_t xEnd = r.right();
-  for (int16_t x = r.x; x < xEnd; ++x) {
-    int16_t outY0, outY1;
-    roundedSpanAtX(r, radius, x, outY0, outY1);
-    if (outY0 >= outY1) continue;
-    if (inner.empty() || x < inner.x || x >= inner.right()) {
-      fillSpanY(x, outY0, outY1, paint.color);
-    } else {
-      int16_t inY0, inY1;
-      roundedSpanAtX(inner, radius, x, inY0, inY1);
-      if (inY0 >= inY1) {
-        fillSpanY(x, outY0, outY1, paint.color);
+  const int16_t innerRadius = static_cast<int16_t>(radius > width ? radius - width : 0);
+  if (isPortraitOrient()) {
+    for (int16_t x = r.x; x < r.right(); ++x) {
+      int16_t o0, o1;
+      roundedSpanAtX(r, radius, x, o0, o1);
+      if (o0 >= o1) continue;
+      if (inner.empty() || x < inner.x || x >= inner.right()) {
+        fillSpanY(x, o0, o1, c);
+        continue;
+      }
+      int16_t i0, i1;
+      roundedSpanAtX(inner, innerRadius, x, i0, i1);
+      if (i0 >= i1) {
+        fillSpanY(x, o0, o1, c);
       } else {
-        if (outY0 < inY0) fillSpanY(x, outY0, inY0, paint.color);
-        if (inY1 < outY1) fillSpanY(x, inY1, outY1, paint.color);
+        if (o0 < i0) fillSpanY(x, o0, i0, c);
+        if (i1 < o1) fillSpanY(x, i1, o1, c);
+      }
+    }
+  } else {
+    for (int16_t y = r.y; y < r.bottom(); ++y) {
+      int16_t o0, o1;
+      roundedSpanAtY(r, radius, y, o0, o1);
+      if (o0 >= o1) continue;
+      if (inner.empty() || y < inner.y || y >= inner.bottom()) {
+        fillSpanX(y, o0, o1, c);
+        continue;
+      }
+      int16_t i0, i1;
+      roundedSpanAtY(inner, innerRadius, y, i0, i1);
+      if (i0 >= i1) {
+        fillSpanX(y, o0, o1, c);
+      } else {
+        if (o0 < i0) fillSpanX(y, o0, i0, c);
+        if (i1 < o1) fillSpanX(y, i1, o1, c);
       }
     }
   }
@@ -348,25 +427,18 @@ int16_t textWidth(DrawTarget& t, const char* str, FontSlot slot) {
   return t.measureText(style.font, str, style).width;
 }
 
+FontSlot fitFont(DrawTarget& t, const char* str, int16_t width, FontSlot preferred) {
+  static constexpr FontSlot kOrder[] = {kFontTitle, kFontBody, kFontSmall, kFontMicro};
+  bool started = false;
+  for (FontSlot f : kOrder) {
+    if (f == preferred) started = true;
+    if (started && textWidth(t, str, f) <= width) return f;
+  }
+  return kFontMicro;
+}
+
 void fillDotGrid(DrawTarget& t, Rect r, int16_t step, Color dotColor) {
   if (step < 2) step = 2;
-  if (g_fb && dotColor == Color::Black) {
-    const int16_t xEnd = static_cast<int16_t>(r.right() - 1);
-    const int16_t yEnd = static_cast<int16_t>(r.bottom() - 1);
-    const bool inverted = (g_orientation == freeink::ui::Orientation::PortraitInverted);
-    for (int16_t x = static_cast<int16_t>(r.x + 2); x < xEnd; x = static_cast<int16_t>(x + step)) {
-      if (x < 0 || x >= kScreenW) continue;
-      uint8_t* const row = inverted ? (g_fb + static_cast<int32_t>(x) * g_pwb)
-                                    : (g_fb + static_cast<int32_t>((g_ph - 1) - x) * g_pwb);
-      for (int16_t y = static_cast<int16_t>(r.y + 2); y < yEnd; y = static_cast<int16_t>(y + step)) {
-        if (y >= 0 && y < kScreenH) {
-          const int16_t px = inverted ? static_cast<int16_t>((g_pw - 1) - y) : y;
-          row[px >> 3] = static_cast<uint8_t>(row[px >> 3] & ~(0x80u >> (px & 7)));
-        }
-      }
-    }
-    return;
-  }
   for (int16_t y = static_cast<int16_t>(r.y + 2); y < r.bottom() - 1; y = static_cast<int16_t>(y + step)) {
     for (int16_t x = static_cast<int16_t>(r.x + 2); x < r.right() - 1; x = static_cast<int16_t>(x + step)) {
       plotPx(t, x, y, dotColor);
@@ -586,8 +658,8 @@ void drawIcon16(DrawTarget& t, int16_t x, int16_t y, Icon icon, Color color) {
   }
 }
 
-void drawTopHud(DrawTarget& t, const DeviceStatus& status, const PetEngine& pet, const char* sectionTag) {
-  const int16_t w = kScreenW;
+void drawTopHud(DrawTarget& t, const DeviceStatus& status, const char* sectionTag) {
+  const int16_t w = screenW();
   const Rect bar{0, 0, w, 40};
   fastFill(t, bar, Paint::solid(Color::Black));
 
@@ -600,25 +672,15 @@ void drawTopHud(DrawTarget& t, const DeviceStatus& status, const PetEngine& pet,
     drawPill(t, 118, 8, 24, sectionTag, kFontMicro, false, 10);
   }
 
-  // Center-right telemetry: Streak & Ink Crystals
-  char streakBuf[20];
-  snprintf(streakBuf, sizeof(streakBuf), "%ug", static_cast<unsigned>(pet.state().streakDays));
-  drawIcon16(t, 260, 12, Icon::Flame, Color::White);
-  drawText(t, Rect{278, 6, 44, 28}, streakBuf, kFontMicro, Color::White, TextAlign::Left, false);
-
-  char crysBuf[20];
-  snprintf(crysBuf, sizeof(crysBuf), "%u", static_cast<unsigned>(pet.state().inkCrystals));
-  drawIcon16(t, 322, 12, Icon::Crystal, Color::White);
-  drawText(t, Rect{340, 6, 42, 28}, crysBuf, kFontMicro, Color::White, TextAlign::Left, false);
-
-  // Clock
+  // Right cluster: [clock] [battery]
+  const int16_t clockX = static_cast<int16_t>(w - 74 - 68);
   char clockBuf[16];
   if (status.clockValid) {
     snprintf(clockBuf, sizeof(clockBuf), "%02u:%02u", status.hour, status.minute);
   } else {
     snprintf(clockBuf, sizeof(clockBuf), "--:--");
   }
-  drawText(t, Rect{382, 6, 58, 28}, clockBuf, kFontMicro, Color::White, TextAlign::Right, false);
+  drawText(t, Rect{clockX, 6, 58, 28}, clockBuf, kFontMicro, Color::White, TextAlign::Right, false);
 
   // Graphical Battery Capsule
   const int16_t bx = static_cast<int16_t>(w - 74);
@@ -627,21 +689,26 @@ void drawTopHud(DrawTarget& t, const DeviceStatus& status, const PetEngine& pet,
   fastStroke(t, battRect, Paint::solid(Color::White), 2, 3);
   fastFill(t, Rect{static_cast<int16_t>(bx + 34), static_cast<int16_t>(by + 5), 3, 8}, Paint::solid(Color::White));
 
-  const int16_t pct = (status.batteryPercent >= 0 && status.batteryPercent <= 100) ? status.batteryPercent : 85;
+  const bool battKnown = status.batteryPercent >= 0 && status.batteryPercent <= 100;
+  const int16_t pct = battKnown ? status.batteryPercent : 0;
   const int16_t fillW = static_cast<int16_t>((26 * pct) / 100);
   if (fillW > 0) {
     fastFill(t, Rect{static_cast<int16_t>(bx + 4), static_cast<int16_t>(by + 4), fillW, 10}, Paint::solid(Color::White));
   }
   char battTxt[12];
-  snprintf(battTxt, sizeof(battTxt), "%d%%", static_cast<int>(pct));
+  if (battKnown) {
+    snprintf(battTxt, sizeof(battTxt), "%d%%", static_cast<int>(pct));
+  } else {
+    snprintf(battTxt, sizeof(battTxt), "--");
+  }
   drawText(t, Rect{static_cast<int16_t>(bx + 39), 6, 34, 28}, battTxt, kFontMicro, Color::White, TextAlign::Left,
            false);
 }
 
 void drawBottomKeyBar(DrawTarget& t, const char* k1, const char* l1, const char* k2, const char* l2, const char* k3,
                       const char* l3) {
-  const int16_t w = kScreenW;
-  const int16_t h = kScreenH;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
   const int16_t barY = static_cast<int16_t>(h - 38);
   const Rect bar{0, barY, w, 38};
 
@@ -669,262 +736,6 @@ void drawBottomKeyBar(DrawTarget& t, const char* k1, const char* l1, const char*
   }
 }
 
-void drawInklingSprite(DrawTarget& t, int16_t cx, int16_t cy, int16_t scale, PetStage stage, PetMood mood,
-                       uint8_t animFrame, bool onDark) {
-  if (scale < 1) scale = 1;
-  const Color fg = onDark ? Color::White : Color::Black;
-  const Color bg = onDark ? Color::Black : Color::White;
-  const int16_t bob = (animFrame & 1) ? -scale : 0;
-  cy = static_cast<int16_t>(cy + bob);
-
-  // Pedestal shadow underneath the creature
-  const int16_t shadowY = static_cast<int16_t>(cy + 18 * scale - bob);
-  fastFill(t,
-           Rect{static_cast<int16_t>(cx - 14 * scale), shadowY, static_cast<int16_t>(28 * scale),
-                static_cast<int16_t>(3 * scale)},
-           Paint::dither(Color::DarkGray), static_cast<uint8_t>(scale * 2));
-
-  switch (stage) {
-    case PetStage::Spore: {
-      // Orbiting rune halo + geometric egg core
-      strokeCircle(t, cx, cy, static_cast<int16_t>(16 * scale), scale, fg);
-      fillCircle(t, cx, cy, static_cast<int16_t>(11 * scale), fg);
-      // Inner rune band
-      fastFill(t,
-               Rect{static_cast<int16_t>(cx - 9 * scale), static_cast<int16_t>(cy + 3 * scale),
-                    static_cast<int16_t>(18 * scale), static_cast<int16_t>(2 * scale)},
-               Paint::solid(bg));
-      drawDiamond(t, cx, static_cast<int16_t>(cy - 6 * scale), static_cast<int16_t>(2 * scale), bg);
-      drawEyes(t, cx, static_cast<int16_t>(cy - scale), static_cast<int16_t>(4 * scale), scale, mood, animFrame, fg,
-               bg);
-      // Orbiting sparks
-      drawStar4(t, static_cast<int16_t>(cx - 18 * scale), static_cast<int16_t>(cy - 10 * scale),
-                static_cast<int16_t>(2 * scale), fg);
-      drawStar4(t, static_cast<int16_t>(cx + 18 * scale), static_cast<int16_t>(cy + 6 * scale),
-                static_cast<int16_t>(2 * scale), fg);
-      break;
-    }
-
-    case PetStage::Drop: {
-      // Cute Gocciolino with twin ink-drop antennae, round body, little feet
-      // Antennae
-      t.line(Point{static_cast<int16_t>(cx - 5 * scale), static_cast<int16_t>(cy - 10 * scale)},
-             Point{static_cast<int16_t>(cx - 9 * scale), static_cast<int16_t>(cy - 18 * scale)},
-             static_cast<uint8_t>(scale * 2), Paint::solid(fg));
-      t.line(Point{static_cast<int16_t>(cx + 5 * scale), static_cast<int16_t>(cy - 10 * scale)},
-             Point{static_cast<int16_t>(cx + 9 * scale), static_cast<int16_t>(cy - 18 * scale)},
-             static_cast<uint8_t>(scale * 2), Paint::solid(fg));
-      fillCircle(t, static_cast<int16_t>(cx - 9 * scale), static_cast<int16_t>(cy - 18 * scale),
-                 static_cast<int16_t>(2 * scale + 1), fg);
-      fillCircle(t, static_cast<int16_t>(cx + 9 * scale), static_cast<int16_t>(cy - 18 * scale),
-                 static_cast<int16_t>(2 * scale + 1), fg);
-
-      // Feet
-      fillCircle(t, static_cast<int16_t>(cx - 7 * scale), static_cast<int16_t>(cy + 13 * scale),
-                 static_cast<int16_t>(3 * scale), fg);
-      fillCircle(t, static_cast<int16_t>(cx + 7 * scale), static_cast<int16_t>(cy + 13 * scale),
-                 static_cast<int16_t>(3 * scale), fg);
-
-      // Main body
-      fillCircle(t, cx, cy, static_cast<int16_t>(14 * scale), fg);
-      // Belly glyph patch
-      fillCircle(t, cx, static_cast<int16_t>(cy + 7 * scale), static_cast<int16_t>(6 * scale), bg);
-      drawDiamond(t, cx, static_cast<int16_t>(cy + 7 * scale), static_cast<int16_t>(2 * scale), fg);
-
-      drawEyes(t, cx, static_cast<int16_t>(cy - 2 * scale), static_cast<int16_t>(5 * scale), scale, mood, animFrame, fg,
-               bg);
-      break;
-    }
-
-    case PetStage::Glyph: {
-      // Glifo Vivente: Kitsune/Owl spirit with tall pointed ears, scarf & ink-brush tail
-      // Tail on the right
-      fillCircle(t, static_cast<int16_t>(cx + 15 * scale), static_cast<int16_t>(cy + 6 * scale),
-                 static_cast<int16_t>(6 * scale), fg);
-      fillCircle(t, static_cast<int16_t>(cx + 18 * scale), static_cast<int16_t>(cy + 3 * scale),
-                 static_cast<int16_t>(3 * scale), bg);
-
-      // Tall pointed ears
-      t.triangle(Point{static_cast<int16_t>(cx - 12 * scale), static_cast<int16_t>(cy - 6 * scale)},
-                 Point{static_cast<int16_t>(cx - 3 * scale), static_cast<int16_t>(cy - 10 * scale)},
-                 Point{static_cast<int16_t>(cx - 11 * scale), static_cast<int16_t>(cy - 22 * scale)}, Paint::solid(fg));
-      t.triangle(Point{static_cast<int16_t>(cx + 12 * scale), static_cast<int16_t>(cy - 6 * scale)},
-                 Point{static_cast<int16_t>(cx + 3 * scale), static_cast<int16_t>(cy - 10 * scale)},
-                 Point{static_cast<int16_t>(cx + 11 * scale), static_cast<int16_t>(cy - 22 * scale)}, Paint::solid(fg));
-
-      // Head & Torso
-      fillCircle(t, cx, static_cast<int16_t>(cy - 3 * scale), static_cast<int16_t>(13 * scale), fg);
-      fastFill(t,
-               Rect{static_cast<int16_t>(cx - 11 * scale), cy, static_cast<int16_t>(22 * scale),
-                    static_cast<int16_t>(15 * scale)},
-               Paint::solid(fg), static_cast<uint8_t>(4 * scale));
-
-      // Woven glyph scarf
-      fastFill(t,
-               Rect{static_cast<int16_t>(cx - 12 * scale), static_cast<int16_t>(cy + 4 * scale),
-                    static_cast<int16_t>(24 * scale), static_cast<int16_t>(4 * scale)},
-               Paint::solid(bg), static_cast<uint8_t>(scale));
-      fastStroke(t,
-                 Rect{static_cast<int16_t>(cx - 12 * scale), static_cast<int16_t>(cy + 4 * scale),
-                      static_cast<int16_t>(24 * scale), static_cast<int16_t>(4 * scale)},
-                 Paint::solid(fg), 1);
-
-      // Forehead diamond crest
-      drawDiamond(t, cx, static_cast<int16_t>(cy - 10 * scale), static_cast<int16_t>(2 * scale), bg);
-      drawEyes(t, cx, static_cast<int16_t>(cy - 3 * scale), static_cast<int16_t>(5 * scale), scale, mood, animFrame, fg,
-               bg);
-      break;
-    }
-
-    case PetStage::Guardian:
-    case PetStage::Archon: {
-      // Majestic winged Guardian / Cosmic Archon with crown halo & rune wings
-      const bool archon = (stage == PetStage::Archon);
-      if (scale >= 2) {
-        // Outer astrolabe halo (medium & large habitat scales)
-        strokeCircle(t, cx, static_cast<int16_t>(cy - 2 * scale), static_cast<int16_t>((archon ? 24 : 20) * scale),
-                     scale, fg);
-        if (archon) {
-          drawStar4(t, cx, static_cast<int16_t>(cy - 24 * scale), static_cast<int16_t>(4 * scale), fg);
-          drawStar4(t, static_cast<int16_t>(cx - 24 * scale), cy, static_cast<int16_t>(3 * scale), fg);
-          drawStar4(t, static_cast<int16_t>(cx + 24 * scale), cy, static_cast<int16_t>(3 * scale), fg);
-        }
-      }
-
-      // Wings
-      const int16_t wingSpan = static_cast<int16_t>((scale == 1 ? 17 : 23) * scale);
-      t.triangle(Point{static_cast<int16_t>(cx - 10 * scale), cy},
-                 Point{static_cast<int16_t>(cx - wingSpan), static_cast<int16_t>(cy - 11 * scale)},
-                 Point{static_cast<int16_t>(cx - (wingSpan - 4 * scale)), static_cast<int16_t>(cy + 9 * scale)},
-                 Paint::solid(fg));
-      t.triangle(Point{static_cast<int16_t>(cx + 10 * scale), cy},
-                 Point{static_cast<int16_t>(cx + wingSpan), static_cast<int16_t>(cy - 11 * scale)},
-                 Point{static_cast<int16_t>(cx + (wingSpan - 4 * scale)), static_cast<int16_t>(cy + 9 * scale)},
-                 Paint::solid(fg));
-
-      // Horns / Crown
-      const int16_t hornTipY = static_cast<int16_t>(cy - (scale == 1 ? 16 : 23) * scale);
-      t.triangle(Point{static_cast<int16_t>(cx - 11 * scale), static_cast<int16_t>(cy - 8 * scale)},
-                 Point{static_cast<int16_t>(cx - 3 * scale), static_cast<int16_t>(cy - 12 * scale)},
-                 Point{static_cast<int16_t>(cx - 9 * scale), hornTipY}, Paint::solid(fg));
-      t.triangle(Point{static_cast<int16_t>(cx + 11 * scale), static_cast<int16_t>(cy - 8 * scale)},
-                 Point{static_cast<int16_t>(cx + 3 * scale), static_cast<int16_t>(cy - 12 * scale)},
-                 Point{static_cast<int16_t>(cx + 9 * scale), hornTipY}, Paint::solid(fg));
-
-      // Body & Cape
-      fillCircle(t, cx, static_cast<int16_t>(cy - 3 * scale), static_cast<int16_t>(13 * scale), fg);
-      fastFill(t,
-               Rect{static_cast<int16_t>(cx - 12 * scale), cy, static_cast<int16_t>(24 * scale),
-                    static_cast<int16_t>(16 * scale)},
-               Paint::solid(fg), static_cast<uint8_t>(5 * scale));
-
-      // Chest core
-      fillCircle(t, cx, static_cast<int16_t>(cy + 8 * scale), static_cast<int16_t>(6 * scale), bg);
-      drawDiamond(t, cx, static_cast<int16_t>(cy + 8 * scale), static_cast<int16_t>(3 * scale), fg);
-      drawDiamond(t, cx, static_cast<int16_t>(cy - 11 * scale), static_cast<int16_t>(2 * scale), bg);
-
-      drawEyes(t, cx, static_cast<int16_t>(cy - 3 * scale), static_cast<int16_t>(5 * scale), scale, mood, animFrame, fg,
-               bg);
-      break;
-    }
-  }
-
-  // Contextual mood overlays (Zzz when sleepy, sparkles when radiant, ink drop when hungry) on habitat scales
-  if (scale < 2) return;
-  if (mood == PetMood::Sleepy) {
-    drawText(t,
-             Rect{static_cast<int16_t>(cx + 12 * scale), static_cast<int16_t>(cy - 22 * scale),
-                  static_cast<int16_t>(22 * scale), static_cast<int16_t>(12 * scale)},
-             "Zzz", kFontSmall, fg, TextAlign::Left, false);
-  } else if (mood == PetMood::Radiant) {
-    drawStar4(t, static_cast<int16_t>(cx - 19 * scale), static_cast<int16_t>(cy - 15 * scale),
-              static_cast<int16_t>(3 * scale), fg);
-    drawStar4(t, static_cast<int16_t>(cx + 19 * scale), static_cast<int16_t>(cy - 13 * scale),
-              static_cast<int16_t>(2 * scale), fg);
-  } else if (mood == PetMood::Hungry) {
-    drawIcon16(t, static_cast<int16_t>(cx + 14 * scale), static_cast<int16_t>(cy - 18 * scale), Icon::Drop, fg);
-  }
-}
-
-void drawHabitatScene(DrawTarget& t, Rect r, const PetEngine& pet, const DeviceStatus& status, bool largeMode) {
-  LocalTime now{};
-  now.valid = status.clockValid;
-  now.year = status.year;
-  now.month = status.month;
-  now.day = status.day;
-  now.hour = status.hour;
-  now.minute = status.minute;
-
-  const PetMood mood = pet.moodState(now);
-  const bool night = pet.state().nightLamp || (status.clockValid && (status.hour >= 21 || status.hour < 6));
-
-  fastFill(t, r, Paint::solid(Color::White), 8);
-  fastStroke(t, r, Paint::solid(Color::Black), 2, 8);
-
-  // Sky backdrop
-  const int16_t horizonY = static_cast<int16_t>(r.bottom() - (largeMode ? 76 : 36));
-  const Rect skyRect{static_cast<int16_t>(r.x + 2), static_cast<int16_t>(r.y + 2),
-                     static_cast<int16_t>(r.width - 4), static_cast<int16_t>(horizonY - r.y - 2)};
-
-  if (night) {
-    // Dark dithered night skyband at the top + crescent moon + constellation stars
-    const Rect topBand{skyRect.x, skyRect.y, skyRect.width, static_cast<int16_t>(skyRect.height / 2)};
-    fastFill(t, topBand, Paint::dither(Color::LightGray));
-    // Crescent moon
-    const int16_t mx = static_cast<int16_t>(r.right() - 36);
-    const int16_t my = static_cast<int16_t>(r.y + 28);
-    fillCircle(t, mx, my, 12, Color::Black);
-    fillCircle(t, static_cast<int16_t>(mx + 5), static_cast<int16_t>(my - 3), 10, Color::White);
-    // Constellation stars
-    drawStar4(t, static_cast<int16_t>(r.x + 28), static_cast<int16_t>(r.y + 22), 3, Color::Black);
-    drawStar4(t, static_cast<int16_t>(r.x + 62), static_cast<int16_t>(r.y + 38), 2, Color::Black);
-    drawStar4(t, static_cast<int16_t>(r.x + 98), static_cast<int16_t>(r.y + 18), 3, Color::Black);
-    t.line(Point{static_cast<int16_t>(r.x + 28), static_cast<int16_t>(r.y + 22)},
-           Point{static_cast<int16_t>(r.x + 62), static_cast<int16_t>(r.y + 38)}, 1, Paint::solid(Color::Black));
-    t.line(Point{static_cast<int16_t>(r.x + 62), static_cast<int16_t>(r.y + 38)},
-           Point{static_cast<int16_t>(r.x + 98), static_cast<int16_t>(r.y + 18)}, 1, Paint::solid(Color::Black));
-  } else {
-    // Cyber-editorial dot-matrix sky + geometric sun/radar rings
-    fillDotGrid(t, skyRect, 8, Color::Black);
-    const int16_t sx = static_cast<int16_t>(r.right() - 36);
-    const int16_t sy = static_cast<int16_t>(r.y + 30);
-    strokeCircle(t, sx, sy, 14, 1, Color::Black);
-    strokeCircle(t, sx, sy, 9, 1, Color::Black);
-    fillCircle(t, sx, sy, 4, Color::Black);
-  }
-
-  // Isometric perspective floor grid below horizonY
-  fastFill(t, Rect{static_cast<int16_t>(r.x + 2), horizonY, static_cast<int16_t>(r.width - 4), 2},
-           Paint::solid(Color::Black));
-  const int16_t floorBot = static_cast<int16_t>(r.bottom() - 2);
-  for (int16_t hy = static_cast<int16_t>(horizonY + 10); hy < floorBot; hy = static_cast<int16_t>(hy + 12)) {
-    fastFill(t, Rect{static_cast<int16_t>(r.x + 2), hy, static_cast<int16_t>(r.width - 4), 1},
-             Paint::solid(Color::Black));
-  }
-  const int16_t vanishX = static_cast<int16_t>(r.x + r.width / 2);
-  const int16_t vanishY = static_cast<int16_t>(horizonY - 24);
-  for (int i = -3; i <= 3; ++i) {
-    const int16_t bx = static_cast<int16_t>(vanishX + i * (r.width / 5));
-    const int16_t hx = static_cast<int16_t>(vanishX + (bx - vanishX) * (horizonY - vanishY) / (floorBot - vanishY));
-    if (hx > r.x + 2 && hx < r.right() - 2 && bx > r.x + 2 && bx < r.right() - 2) {
-      t.line(Point{hx, horizonY}, Point{bx, floorBot}, 1, Paint::solid(Color::Black));
-    }
-  }
-
-  // Subtle IMU tilt shift for the creature (+/- 10px)
-  int16_t imuShiftX = 0;
-  if (status.imuReady) {
-    const int shift = static_cast<int>(status.ax * 14.0f);
-    if (shift < -12) imuShiftX = -12;
-    else if (shift > 12) imuShiftX = 12;
-    else imuShiftX = static_cast<int16_t>(shift);
-  }
-
-  const int16_t petCx = static_cast<int16_t>(r.x + r.width / 2 + imuShiftX);
-  const int16_t petCy = static_cast<int16_t>(horizonY - (largeMode ? 22 : 16));
-  drawInklingSprite(t, petCx, petCy, largeMode ? 3 : 2, pet.stage(), mood, pet.animFrame(), false);
-}
-
 void drawBookCover(DrawTarget& t, int16_t x, int16_t y, const char* title, const char* author,
                    const uint8_t* coverBits) {
   const Rect r{x, y, kCoverW, kCoverH};
@@ -935,13 +746,13 @@ void drawBookCover(DrawTarget& t, int16_t x, int16_t y, const char* title, const
   fastStroke(t, r, Paint::solid(Color::Black), 2, 4);
 
   if (coverBits != nullptr) {
-    // Render real cached 1-bit cover thumbnail inside the frame
+    // Render real cached 1-bit cover thumbnail inside the frame (1:1 pixel blitting)
     freeink::ui::BitmapRef ref{};
     ref.data = coverBits;
     ref.width = kCoverW;
     ref.height = kCoverH;
     ref.format = freeink::ui::BitmapFormat::BW1;
-    t.bitmap(r, ref, freeink::ui::BitmapMode::Cover, Paint::solid(Color::Black));
+    t.bitmap(r, ref, freeink::ui::BitmapMode::Center, Paint::solid(Color::Black));
     fastStroke(t, r, Paint::solid(Color::Black), 2, 4);
     return;
   }

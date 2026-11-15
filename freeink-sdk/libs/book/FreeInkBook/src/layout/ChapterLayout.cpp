@@ -882,6 +882,14 @@ class LayoutEngine : public XmlHandler {
     if (stack_[stackTop_].displayNone) return;
     for (int i = 0; i < len; ++i) {
       const char c = text[i];
+      if (static_cast<uint8_t>(c) == 0xEF && i + 2 < len &&
+          static_cast<uint8_t>(text[i + 1]) == 0xBF &&
+          static_cast<uint8_t>(text[i + 2]) == 0xBC) {
+        // Skip U+FFFC (OBJECT REPLACEMENT CHARACTER) emitted by Apple Pages
+        // before inline <img> tags so it doesn't render as an [OBJ] box.
+        i += 2;
+        continue;
+      }
       if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
         pendingSpace_ = parLen_ > 0;  // collapse runs; drop leading whitespace
       } else {
@@ -1133,24 +1141,57 @@ class LayoutEngine : public XmlHandler {
       return;
     }
 
-    // Fit within the content box, preserving aspect, never upscaling.
+    // Check whether existing runs on the page are only whitespace / NBSP
+    // (e.g. Calibre/Pages `<p>&nbsp;</p>` spacer before a cover image).
+    bool onlyWhitespaceRuns = (imageCount_ == 0);
+    for (uint16_t r = 0; r < runCount_ && onlyWhitespaceRuns; ++r) {
+      const char* s = runs_[r].text;
+      const uint16_t len = runs_[r].len;
+      for (uint16_t k = 0; k < len; ++k) {
+        const uint8_t b = static_cast<uint8_t>(s[k]);
+        if (b == ' ' || b == '\t' || b == '\r' || b == '\n') continue;
+        if (b == 0xC2 && k + 1 < len && static_cast<uint8_t>(s[k + 1]) == 0xA0) {
+          ++k;
+          continue;
+        }
+        onlyWhitespaceRuns = false;
+        break;
+      }
+    }
+
     const int32_t contentW = params_.pageWidth - params_.marginLeft - params_.marginRight;
     const int32_t contentH = params_.pageHeight - params_.marginTop - params_.marginBottom;
+    const bool isFullPageCover =
+        onlyWhitespaceRuns &&
+        static_cast<int32_t>(info.width) >= (contentW * 3) / 4 &&
+        static_cast<int32_t>(info.height) >= contentH / 2;
+
+    if (onlyWhitespaceRuns && runCount_ > 0 &&
+        (isFullPageCover || pageY_ + info.height > params_.pageHeight - params_.marginBottom)) {
+      runCount_ = 0;
+      pageY_ = params_.marginTop;
+    }
+
+    // Full-page cover images use the full page box (avoiding a 528->484 margin
+    // downscale on native-width covers); inline images fit within the text box.
+    const int32_t boxW = isFullPageCover ? params_.pageWidth : contentW;
+    const int32_t boxH = isFullPageCover ? params_.pageHeight : contentH;
     int32_t w = info.width;
     int32_t h = info.height;
-    if (w > contentW) {
-      h = h * contentW / w;
-      w = contentW;
+    if (w > boxW) {
+      h = h * boxW / w;
+      w = boxW;
     }
-    if (h > contentH) {
-      w = w * contentH / h;
-      h = contentH;
+    if (h > boxH) {
+      w = w * boxH / h;
+      h = boxH;
     }
     if (w < 1) w = 1;
     if (h < 1) h = 1;
 
     const bool hasContent = runCount_ > 0 || imageCount_ > 0 || pageY_ > params_.marginTop;
-    if ((pageY_ + h > params_.pageHeight - params_.marginBottom || imageCount_ >= kMaxImagesPerPage) &&
+    if (!isFullPageCover &&
+        (pageY_ + h > params_.pageHeight - params_.marginBottom || imageCount_ >= kMaxImagesPerPage) &&
         hasContent) {
       emitPage();
       if (stopParse) {
@@ -1169,10 +1210,17 @@ class LayoutEngine : public XmlHandler {
     img.href = hrefCopy;
     img.width = static_cast<uint16_t>(w);
     img.height = static_cast<uint16_t>(h);
-    img.x = static_cast<int16_t>(params_.marginLeft + (contentW - w) / 2);
-    img.y = pageY_;
-    if (runCount_ == 0 && imageCount_ == 1) pageCharStart_ = parCharBase_;
-    pageY_ = static_cast<int16_t>(pageY_ + h + params_.baseSizePx / 2);
+    if (isFullPageCover) {
+      img.x = static_cast<int16_t>((params_.pageWidth - w) / 2);
+      img.y = static_cast<int16_t>((params_.pageHeight - h) / 2);
+      pageCharStart_ = parCharBase_;
+      pageY_ = params_.pageHeight;
+    } else {
+      img.x = static_cast<int16_t>(params_.marginLeft + (contentW - w) / 2);
+      img.y = pageY_;
+      if (runCount_ == 0 && imageCount_ == 1) pageCharStart_ = parCharBase_;
+      pageY_ = static_cast<int16_t>(pageY_ + h + params_.baseSizePx / 2);
+    }
   }
 
   // --- measure phase ----------------------------------------------------------

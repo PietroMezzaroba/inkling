@@ -15,32 +15,64 @@ namespace book {
 
 namespace {
 
-// Maps completed source rows to output rows with box-filter averaging: every
-// source pixel contributes to exactly one output pixel, so downscales keep
-// tonal detail instead of sampling every Nth pixel (nearest-neighbor's
-// aliasing reads as blur/jaggies on photos).
+// Maps completed source rows to output rows with exact 2D sub-pixel box-filter
+// area averaging: every output pixel accumulates a uniform weight of `srcW`
+// horizontally and `srcH` vertically, eliminating periodic step seams when
+// downscaling near 1:1 (e.g. 528x789 -> 504x754) as well as moiré on thumbnails.
 struct RowScaler {
   uint16_t srcW = 0;
   uint16_t srcH = 0;
   uint16_t dstW = 0;
   uint16_t dstH = 0;
-  uint8_t* dstRow = nullptr;
-  uint32_t* sums = nullptr;    // dstW accumulators
-  uint16_t* counts = nullptr;  // dstW sample counts
+  uint8_t* hRow = nullptr;    // dstW horizontally averaged row
+  uint8_t* dstRow = nullptr;  // dstW output row
+  uint32_t* sums = nullptr;   // dstW vertical accumulators (total weight per row = srcH)
   ImageRowFn rowFn = nullptr;
   void* user = nullptr;
   uint32_t nextDst = 0;
+  uint32_t vAccumWeight = 0;
   bool stopped = false;
   bool failed = false;
 
   void resetAccum() {
     memset(sums, 0, static_cast<size_t>(dstW) * sizeof(uint32_t));
-    memset(counts, 0, static_cast<size_t>(dstW) * sizeof(uint16_t));
+    vAccumWeight = 0;
   }
 
-  bool emitAveraged() {
+  void scaleRowHoriz(const uint8_t* gray) {
+    if (dstW >= srcW) {
+      for (uint32_t dx = 0; dx < dstW; ++dx) {
+        const uint32_t sx = (dx * srcW) / dstW;
+        hRow[dx] = gray[sx < srcW ? sx : (srcW - 1)];
+      }
+      return;
+    }
+    uint32_t dx = 0;
+    uint32_t accum = 0;
+    uint32_t weightLeft = srcW;
+    for (uint32_t sx = 0; sx < srcW; ++sx) {
+      uint32_t span = dstW;
+      const uint32_t v = gray[sx];
+      while (span >= weightLeft && dx < dstW) {
+        accum += weightLeft * v;
+        hRow[dx++] = static_cast<uint8_t>((accum + (srcW >> 1)) / srcW);
+        span -= weightLeft;
+        accum = 0;
+        weightLeft = srcW;
+      }
+      if (span > 0 && dx < dstW) {
+        accum += span * v;
+        weightLeft -= span;
+      }
+    }
+  }
+
+  bool emitRow(uint32_t normWeight) {
+    if (normWeight == 0) normWeight = 1;
+    const uint32_t half = normWeight >> 1;
     for (uint32_t x = 0; x < dstW; ++x) {
-      dstRow[x] = counts[x] != 0 ? static_cast<uint8_t>(sums[x] / counts[x]) : 0xFF;
+      const uint32_t v = (sums[x] + half) / normWeight;
+      dstRow[x] = static_cast<uint8_t>(v > 255 ? 255 : v);
     }
     if (!rowFn(user, static_cast<uint16_t>(nextDst), dstRow, dstW)) {
       stopped = true;
@@ -54,32 +86,49 @@ struct RowScaler {
   // Feeds one completed source row; emits output rows as their source bands
   // complete.
   bool feedSourceRow(uint32_t srcY, const uint8_t* gray) {
-    // Emit any output rows whose source band ended before this row.
-    while (nextDst < dstH &&
-           srcY >= static_cast<uint64_t>(nextDst + 1) * srcH / dstH) {
-      if (!emitAveraged()) return false;
-    }
-    if (nextDst >= dstH) return true;
-    for (uint32_t x = 0; x < srcW; ++x) {
-      const uint32_t dx = static_cast<uint64_t>(x) * dstW / srcW;
-      sums[dx] += gray[x];
-      ++counts[dx];
-    }
-    // Last source row of the image: flush the final band.
-    if (srcY + 1 == srcH) {
-      while (nextDst < dstH) {
-        if (!emitAveraged()) return false;
+    if (nextDst >= dstH || stopped) return !stopped;
+    scaleRowHoriz(gray);
+
+    if (dstH >= srcH) {
+      while (nextDst < dstH && (nextDst * srcH) / dstH <= srcY) {
+        if (!rowFn(user, static_cast<uint16_t>(nextDst), hRow, dstW)) {
+          stopped = true;
+          return false;
+        }
+        ++nextDst;
       }
+      return true;
+    }
+
+    uint32_t span = dstH;
+    while (span > 0 && nextDst < dstH) {
+      const uint32_t need = srcH - vAccumWeight;
+      if (span >= need) {
+        for (uint32_t x = 0; x < dstW; ++x) {
+          sums[x] += need * hRow[x];
+        }
+        if (!emitRow(srcH)) return false;
+        span -= need;
+      } else {
+        for (uint32_t x = 0; x < dstW; ++x) {
+          sums[x] += span * hRow[x];
+        }
+        vAccumWeight += span;
+        span = 0;
+      }
+    }
+    if (srcY + 1 == srcH && nextDst < dstH && vAccumWeight > 0) {
+      if (!emitRow(vAccumWeight)) return false;
     }
     return true;
   }
 };
 
 bool initScaler(RowScaler& scaler, Arena& scratch) {
+  scaler.hRow = static_cast<uint8_t*>(scratch.alloc(scaler.dstW, 1));
   scaler.dstRow = static_cast<uint8_t*>(scratch.alloc(scaler.dstW, 1));
   scaler.sums = scratch.allocArray<uint32_t>(scaler.dstW);
-  scaler.counts = scratch.allocArray<uint16_t>(scaler.dstW);
-  if (scaler.dstRow == nullptr || scaler.sums == nullptr || scaler.counts == nullptr) {
+  if (scaler.hRow == nullptr || scaler.dstRow == nullptr || scaler.sums == nullptr) {
     return false;
   }
   scaler.resetAccum();
@@ -710,26 +759,81 @@ void ditherRowOrdered(const uint8_t* gray, uint16_t width, uint16_t y, uint8_t* 
   }
 }
 
-BookStatus ImageRenderer::render(BookSource& source, const ZipCatalog& zip,
-                                 const PageImage& image, Arena& scratch, ImageRowFn rowFn,
-                                 void* user) {
-  if (image.width == 0 || image.height == 0) return BookStatus::Unsupported;
-  const ZipEntry* entry = zip.find(image.href);
-  if (entry == nullptr) return BookStatus::NotFound;
+void ditherRowAtkinson(const uint8_t* gray, uint16_t width, int16_t* err0, int16_t* err1,
+                       int16_t* err2, uint8_t* outBits) {
+  memset(outBits, 0, (width + 7u) / 8u);
+  for (uint16_t x = 0; x < width; ++x) {
+    // E-paper contrast curve (1.18x around midpoint 128) so paper whites stay
+    // clean and cover typography / black fills stay crisp without pinhole noise.
+    int32_t c = ((static_cast<int32_t>(gray[x]) - 128) * 118) / 100 + 128;
+    if (c < 0) c = 0;
+    if (c > 255) c = 255;
 
+    int32_t v = c + err0[x + 2];
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    const bool black = v < 128;
+    if (black) {
+      outBits[x >> 3] |= static_cast<uint8_t>(0x80u >> (x & 7));
+    }
+    // Atkinson distributes 6/8 (75%) of quantization error across 6 neighbors.
+    const int16_t err8 = static_cast<int16_t>((v - (black ? 0 : 255)) >> 3);
+    err0[x + 3] = static_cast<int16_t>(err0[x + 3] + err8);
+    err0[x + 4] = static_cast<int16_t>(err0[x + 4] + err8);
+    err1[x + 1] = static_cast<int16_t>(err1[x + 1] + err8);
+    err1[x + 2] = static_cast<int16_t>(err1[x + 2] + err8);
+    err1[x + 3] = static_cast<int16_t>(err1[x + 3] + err8);
+    err2[x + 2] = static_cast<int16_t>(err2[x + 2] + err8);
+  }
+  memcpy(err0, err1, (width + 4u) * sizeof(int16_t));
+  memcpy(err1, err2, (width + 4u) * sizeof(int16_t));
+  memset(err2, 0, (width + 4u) * sizeof(int16_t));
+}
+
+BookStatus ImageRenderer::renderEntry(BookSource& source, const ZipEntry& entry,
+                                      uint16_t maxWidth, uint16_t maxHeight, Arena& scratch,
+                                      ImageRowFn rowFn, void* user, uint16_t* outWidth,
+                                      uint16_t* outHeight, bool stretchToBox) {
+  if (maxWidth == 0 || maxHeight == 0) return BookStatus::Unsupported;
   const size_t marked = scratch.mark();
   ImageInfo info;
-  BookStatus status = probeImage(source, *entry, scratch, &info);
+  BookStatus status = probeImage(source, entry, scratch, &info);
   if (status == BookStatus::Ok) {
+    if (info.kind == ImageInfo::Kind::Unknown || info.width == 0 || info.height == 0) {
+      scratch.release(marked);
+      return BookStatus::Unsupported;
+    }
+    int32_t w = info.width;
+    int32_t h = info.height;
+    if (stretchToBox) {
+      w = maxWidth;
+      h = maxHeight;
+    } else {
+      if (w > maxWidth) {
+        h = h * maxWidth / w;
+        w = maxWidth;
+      }
+      if (h > maxHeight) {
+        w = w * maxHeight / h;
+        h = maxHeight;
+      }
+      if (w < 1) w = 1;
+      if (h < 1) h = 1;
+    }
+    if (outWidth) *outWidth = static_cast<uint16_t>(w);
+    if (outHeight) *outHeight = static_cast<uint16_t>(h);
+
+    PageImage image{};
+    image.width = static_cast<uint16_t>(w);
+    image.height = static_cast<uint16_t>(h);
     switch (info.kind) {
       case ImageInfo::Kind::Png:
-        status = renderPng(source, *entry, image, info.width, info.height, scratch, rowFn,
-                           user);
+        status = renderPng(source, entry, image, info.width, info.height, scratch, rowFn, user);
         break;
       case ImageInfo::Kind::Jpeg:
         status = info.progressive
-                     ? renderJpegProgressive(source, *entry, image, scratch, rowFn, user)
-                     : renderJpeg(source, *entry, image, scratch, rowFn, user);
+                     ? renderJpegProgressive(source, entry, image, scratch, rowFn, user)
+                     : renderJpeg(source, entry, image, scratch, rowFn, user);
         break;
       case ImageInfo::Kind::Unknown:
         status = BookStatus::Unsupported;
@@ -738,6 +842,16 @@ BookStatus ImageRenderer::render(BookSource& source, const ZipCatalog& zip,
   }
   scratch.release(marked);
   return status;
+}
+
+BookStatus ImageRenderer::render(BookSource& source, const ZipCatalog& zip,
+                                 const PageImage& image, Arena& scratch, ImageRowFn rowFn,
+                                 void* user) {
+  if (image.width == 0 || image.height == 0) return BookStatus::Unsupported;
+  const ZipEntry* entry = zip.find(image.href);
+  if (entry == nullptr) return BookStatus::NotFound;
+  return renderEntry(source, *entry, image.width, image.height, scratch, rowFn, user, nullptr,
+                     nullptr, /*stretchToBox=*/true);
 }
 
 }  // namespace book

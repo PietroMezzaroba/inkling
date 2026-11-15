@@ -10,7 +10,7 @@ namespace book {
 
 namespace {
 
-constexpr uint16_t kFormatVersion = 3;  // v3: link records + anchor table
+constexpr uint16_t kFormatVersion = 4;  // v4: full-bleed cover layout + link records
 constexpr uint32_t kHeaderSize = 12;
 constexpr uint32_t kFooterSize = 24;  // v3: + anchors + totalChars
 // Partial (suspended-build) footer: the final footer's five u32 fields plus

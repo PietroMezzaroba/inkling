@@ -286,7 +286,8 @@ void TextRpgEngine::resolveChoice(int choice) {
 void TextRpgEngine::render(freeink::ui::DrawTarget& t, const DeviceStatus& status) {
   (void)status;
   clearScreen();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
 
   // 1. Top HUD Bar (y=8..34)
   drawPill(t, 14, 8, 22, "LA CRIPTA DEI TOMI // ROGUE", ui::kFontMicro, true, 10);
@@ -294,7 +295,108 @@ void TextRpgEngine::render(freeink::ui::DrawTarget& t, const DeviceStatus& statu
   snprintf(depthBadge, sizeof(depthBadge), "PIANO %d · LV.%d", depth_, level_);
   drawPill(t, static_cast<int16_t>(w - 116), 8, 22, depthBadge, ui::kFontMicro, false, 8);
 
-  // 2. Character Stats Strip (y=38..104)
+  const char* const choices[] = {choice0_, choice1_, choice2_};
+  const uint8_t hpPct = playerMaxHp_ > 0 ? (playerHp_ * 100 / playerMaxHp_) : 0;
+
+  if (w > h) {
+    // Landscape widescreen layout (792x528)
+    const Rect statsCard{14, 34, static_cast<int16_t>(w - 28), 46};
+    drawCard(t, statsCard, 8, 2, false, true);
+
+    char hpStr[32];
+    snprintf(hpStr, sizeof(hpStr), "HP %d/%d", playerHp_ > 0 ? playerHp_ : 0, playerMaxHp_);
+    drawText(t, Rect{26, 45, 110, 22}, hpStr, ui::kFontBody, Color::Black);
+    drawProgressBar(t, Rect{140, 50, 120, 14}, hpPct > 100 ? 100 : hpPct, false);
+
+    char resLine[96];
+    snprintf(resLine, sizeof(resLine), "Torce: %d  ·  Grimaldelli: %d  ·  Monete: %d  ·  %s", torches_, lockpicks_,
+             gold_, weaponName_);
+    drawText(t, Rect{278, 46, static_cast<int16_t>(w - 296), 22}, resLine, ui::kFontSmall, Color::Black);
+
+    // Left Column (x=14..394, width=380): Narrative + Event Log
+    const int16_t leftX = 14;
+    const int16_t leftW = 380;
+    const Rect storyCard{leftX, 88, leftW, 240};
+    drawCard(t, storyCard, 10, 3, false, false);
+
+    fastFill(t, Rect{24, 98, static_cast<int16_t>(leftW - 20), 28}, Paint::solid(Color::Black), 6);
+    drawText(t, Rect{32, 101, static_cast<int16_t>(leftW - 36), 22}, roomTitle_, ui::kFontSmall, Color::White);
+
+    TextStyle descStyle;
+    descStyle.font = static_cast<freeink::ui::FontId>(ui::kFontBody);
+    descStyle.color = Color::Black;
+    descStyle.align = TextAlign::Left;
+    descStyle.maxLines = 5;
+    t.text(Rect{26, 136, static_cast<int16_t>(leftW - 24), 124}, roomDesc_, descStyle);
+
+    if (roomType_ == RpgRoomType::Encounter && enemy_.hp > 0) {
+      const Rect enemyBox{26, 268, static_cast<int16_t>(leftW - 24), 48};
+      fastStroke(t, enemyBox, Paint::solid(Color::Black), 1, 6);
+      drawText(t, Rect{36, 274, 190, 20}, enemy_.name, ui::kFontSmall, Color::Black);
+      char ehp[32];
+      snprintf(ehp, sizeof(ehp), "HP: %d/%d", enemy_.hp, enemy_.maxHp);
+      drawText(t, Rect{static_cast<int16_t>(enemyBox.right() - 94), 274, 84, 20}, ehp, ui::kFontMicro, Color::Black,
+               TextAlign::Right);
+      const uint8_t enemyPct = (enemy_.hp * 100) / enemy_.maxHp;
+      drawProgressBar(t, Rect{36, 298, static_cast<int16_t>(enemyBox.width - 20), 10}, enemyPct, false);
+    } else if (roomType_ == RpgRoomType::Treasure) {
+      drawPill(t, 26, 286, 22, "CAMERA DEL TESORO", ui::kFontMicro, true, 8);
+    } else {
+      drawPill(t, 26, 286, 22, "SANTUARIO DI PACE", ui::kFontMicro, true, 8);
+    }
+
+    const Rect logCard{leftX, 336, leftW, 144};
+    drawCard(t, logCard, 10, 3, false, false);
+    fastFill(t, Rect{24, 346, static_cast<int16_t>(leftW - 20), 22}, Paint::solid(Color::Black), 4);
+    drawText(t, Rect{32, 349, static_cast<int16_t>(leftW - 36), 16}, "REGISTRO DEGLI EVENTI", ui::kFontMicro,
+             Color::White);
+    TextStyle logStyle;
+    logStyle.font = static_cast<freeink::ui::FontId>(ui::kFontSmall);
+    logStyle.color = Color::Black;
+    logStyle.align = TextAlign::Left;
+    logStyle.maxLines = 4;
+    t.text(Rect{26, 376, static_cast<int16_t>(leftW - 24), 92}, lastLog_, logStyle);
+
+    // Right Column (x=406..778, width=372): Interactive Choices + Reading Bonus
+    const int16_t rightX = 406;
+    const int16_t rightW = static_cast<int16_t>(w - rightX - 14);
+    const int16_t choiceH = 92;
+    for (int i = 0; i < choiceCount_; ++i) {
+      const int16_t cy = static_cast<int16_t>(88 + i * (choiceH + 10));
+      const bool sel = (selectedChoice_ == i);
+      const Rect cr{rightX, cy, rightW, choiceH};
+      drawCard(t, cr, 8, sel ? 4 : 2, sel, sel);
+      const Color fg = sel ? Color::White : Color::Black;
+      char prefix[16];
+      snprintf(prefix, sizeof(prefix), "AZIONE [%c]", 'A' + i);
+      drawPill(t, static_cast<int16_t>(rightX + 14), static_cast<int16_t>(cy + 12), 20, prefix, ui::kFontMicro, !sel,
+               8);
+      if (sel) {
+        drawPill(t, static_cast<int16_t>(cr.right() - 88), static_cast<int16_t>(cy + 12), 20, "OK", ui::kFontMicro,
+                 false, 8);
+      }
+      TextStyle cs;
+      cs.font = static_cast<freeink::ui::FontId>(ui::kFontBody);
+      cs.color = fg;
+      cs.align = TextAlign::Left;
+      cs.maxLines = 2;
+      t.text(Rect{static_cast<int16_t>(rightX + 14), static_cast<int16_t>(cy + 38), static_cast<int16_t>(rightW - 28),
+                  46},
+             choices[i], cs);
+    }
+
+    if (playerHp_ <= 0) {
+      drawPill(t, rightX, 396, 26, "CADUTO · PREMI OK PER RICOMINCIARE", ui::kFontMicro, true, 10);
+    } else {
+      drawText(t, Rect{rightX, 400, rightW, 44},
+               "Bonus Lettura: leggere pagine nei libri ricarica Torce e HP!", ui::kFontSmall, Color::Black);
+    }
+
+    drawBottomKeyBar(t, "SU/GIÙ", "Scegli", "OK", "Azione", "BACK", "Esci");
+    return;
+  }
+
+  // 2. Character Stats Strip (Portrait 528x792: y=38..104)
   const Rect statsCard{14, 38, static_cast<int16_t>(w - 28), 66};
   drawCard(t, statsCard, 8, 3, false, true);
 
@@ -302,7 +404,6 @@ void TextRpgEngine::render(freeink::ui::DrawTarget& t, const DeviceStatus& statu
   char hpStr[32];
   snprintf(hpStr, sizeof(hpStr), "HP %d/%d", playerHp_ > 0 ? playerHp_ : 0, playerMaxHp_);
   drawText(t, Rect{26, 46, 140, 18}, hpStr, ui::kFontBody, Color::Black);
-  const uint8_t hpPct = playerMaxHp_ > 0 ? (playerHp_ * 100 / playerMaxHp_) : 0;
   drawProgressBar(t, Rect{26, 70, 140, 14}, hpPct > 100 ? 100 : hpPct, false);
 
   // Resources: Torches, Picks, Gold
@@ -350,7 +451,6 @@ void TextRpgEngine::render(freeink::ui::DrawTarget& t, const DeviceStatus& statu
   }
 
   // 4. Interactive Choices List (y=360..574)
-  const char* const choices[] = {choice0_, choice1_, choice2_};
   const int16_t choiceStartY = 360;
   const int16_t choiceH = 66;
 

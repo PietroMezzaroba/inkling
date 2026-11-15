@@ -117,16 +117,17 @@ uint32_t decodeUtf8(const char* text, uint32_t len, uint32_t& i) {
   return cp;
 }
 
-// Blits decoded rows into the frame. Mono targets get Floyd–Steinberg error
-// diffusion (rows arrive strictly top-to-bottom, so the error rows carry
-// between callbacks) — tonal grays render as smooth stipple instead of the
-// ordered-dither crosshatch.
+// Blits decoded rows into the frame. Mono targets get Atkinson error
+// diffusion with e-paper contrast boost (rows arrive strictly top-to-bottom,
+// so the 3 error rows carry between callbacks) — preserving clean paper whites,
+// deep blacks, and sharp cover typography without Floyd-Steinberg worm artifacts.
 struct ImageBlit {
   const FrameTarget* target;
   int16_t x;
   int16_t y;
-  int16_t* err;      // width+2 entries, index shifted by 1
-  int16_t* errNext;  // width+2 entries
+  int16_t* err0;     // width+4 entries, index shifted by 2
+  int16_t* err1;     // width+4 entries
+  int16_t* err2;     // width+4 entries
   uint16_t errWidth;
 
   static bool onRow(void* user, uint16_t rowY, const uint8_t* gray, uint16_t width) {
@@ -143,19 +144,26 @@ struct ImageBlit {
     }
     if (width > self->errWidth) width = self->errWidth;
     for (uint16_t i = 0; i < width; ++i) {
-      int32_t v = gray[i] + self->err[i + 1];
+      int32_t c = ((static_cast<int32_t>(gray[i]) - 128) * 118) / 100 + 128;
+      if (c < 0) c = 0;
+      if (c > 255) c = 255;
+
+      int32_t v = c + self->err0[i + 2];
       if (v < 0) v = 0;
       if (v > 255) v = 255;
       const bool black = v < 128;
       if (black) setBlack(t, self->x + i, self->y + rowY);
-      const int32_t residual = v - (black ? 0 : 255);
-      self->err[i + 2] = static_cast<int16_t>(self->err[i + 2] + residual * 7 / 16);
-      self->errNext[i] = static_cast<int16_t>(self->errNext[i] + residual * 3 / 16);
-      self->errNext[i + 1] = static_cast<int16_t>(self->errNext[i + 1] + residual * 5 / 16);
-      self->errNext[i + 2] = static_cast<int16_t>(self->errNext[i + 2] + residual / 16);
+      const int16_t err8 = static_cast<int16_t>((v - (black ? 0 : 255)) >> 3);
+      self->err0[i + 3] = static_cast<int16_t>(self->err0[i + 3] + err8);
+      self->err0[i + 4] = static_cast<int16_t>(self->err0[i + 4] + err8);
+      self->err1[i + 1] = static_cast<int16_t>(self->err1[i + 1] + err8);
+      self->err1[i + 2] = static_cast<int16_t>(self->err1[i + 2] + err8);
+      self->err1[i + 3] = static_cast<int16_t>(self->err1[i + 3] + err8);
+      self->err2[i + 2] = static_cast<int16_t>(self->err2[i + 2] + err8);
     }
-    memcpy(self->err, self->errNext, (self->errWidth + 2u) * sizeof(int16_t));
-    memset(self->errNext, 0, (self->errWidth + 2u) * sizeof(int16_t));
+    memcpy(self->err0, self->err1, (self->errWidth + 4u) * sizeof(int16_t));
+    memcpy(self->err1, self->err2, (self->errWidth + 4u) * sizeof(int16_t));
+    memset(self->err2, 0, (self->errWidth + 4u) * sizeof(int16_t));
     return true;
   }
 };
@@ -220,15 +228,18 @@ BookStatus PageRenderer::renderImages(const Page& page, BookSource& source,
   for (uint16_t m = 0; m < page.imageCount; ++m) {
     const PageImage& image = page.images[m];
     const size_t marked = scratch.mark();
-    int16_t* err = scratch.allocArray<int16_t>(image.width + 2u);
-    int16_t* errNext = scratch.allocArray<int16_t>(image.width + 2u);
-    if (err == nullptr || errNext == nullptr) {
+    const size_t errCap = static_cast<size_t>(image.width) + 4u;
+    int16_t* err0 = scratch.allocArray<int16_t>(errCap);
+    int16_t* err1 = scratch.allocArray<int16_t>(errCap);
+    int16_t* err2 = scratch.allocArray<int16_t>(errCap);
+    if (err0 == nullptr || err1 == nullptr || err2 == nullptr) {
       scratch.release(marked);
       return BookStatus::OutOfMemory;
     }
-    memset(err, 0, (image.width + 2u) * sizeof(int16_t));
-    memset(errNext, 0, (image.width + 2u) * sizeof(int16_t));
-    ImageBlit blit{&target, image.x, image.y, err, errNext, image.width};
+    memset(err0, 0, errCap * sizeof(int16_t));
+    memset(err1, 0, errCap * sizeof(int16_t));
+    memset(err2, 0, errCap * sizeof(int16_t));
+    ImageBlit blit{&target, image.x, image.y, err0, err1, err2, image.width};
     const BookStatus status =
         ImageRenderer::render(source, zip, image, scratch, ImageBlit::onRow, &blit);
     scratch.release(marked);

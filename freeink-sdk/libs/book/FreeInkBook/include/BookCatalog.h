@@ -128,6 +128,10 @@ class BookCatalog {
   // The container's cover image, when the package declares one.
   bool coverEntry(ZipEntry* out) const;
 
+  // Returns the declared OPF cover image, or falls back to scanning the first
+  // spine XHTML document for its first <img> / <image> reference.
+  bool findCoverOrFirstImage(BookSource& source, Arena& scratch, ZipEntry* out) const;
+
   // ZipCatalog-compatible lookup view for layout and image rendering: find()
   // and findByHash() binary-search the resident hash table and read the
   // 16-byte entry record from SD. The returned pointer aims at a single

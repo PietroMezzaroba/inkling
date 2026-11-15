@@ -14,232 +14,323 @@ using namespace inkling::ui::canvas;
 void diagnosticScreen(UiApp::ScreenType& screen, void* user) {
   const auto& s = *static_cast<const DeviceStatus*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
+  const bool land = isLandscape();
 
   clearScreen();
-  PetEngine dummyPet{};
-  drawTopHud(t, s, dummyPet, "SISTEMA");
+  drawTopHud(t, s, "SISTEMA");
 
-  // 1. Hardware & Memory Deck Card
-  const Rect hwCard{16, 52, static_cast<int16_t>(w - 32), 186};
+  // Four cards: stacked in portrait, two columns in landscape.
+  const int16_t m = 16;
+  const int16_t gap = 12;
+  const int16_t colW = land ? static_cast<int16_t>((w - 2 * m - gap) / 2) : static_cast<int16_t>(w - 2 * m);
+  const int16_t col2 = land ? static_cast<int16_t>(m + colW + gap) : m;
+  const int16_t top = 50;
+  const Rect hwCard{m, top, colW, 150};
+  const Rect imuCard{col2, land ? top : static_cast<int16_t>(hwCard.bottom() + gap), colW, 176};
+  const Rect pwrCard{m, static_cast<int16_t>((land ? hwCard.bottom() : imuCard.bottom()) + gap), colW, 132};
+  const Rect tipCard{col2, static_cast<int16_t>((land ? imuCard.bottom() : pwrCard.bottom()) + gap), colW, 86};
+
+  // 1. Hardware & memory.
   drawCard(t, hwCard, 8, 4, false, true);
-  drawPill(t, 30, 64, 24, "TELEMETRIA HARDWARE", kFontMicro, true, 10);
-
+  const int16_t hx = static_cast<int16_t>(hwCard.x + 14);
+  const int16_t hw = static_cast<int16_t>(hwCard.width - 28);
+  drawPill(t, hx, static_cast<int16_t>(hwCard.y + 12), 24, "HARDWARE E MEMORIA", kFontMicro, true, 10);
   char panelBuf[48];
-  snprintf(panelBuf, sizeof(panelBuf), "%s · Display %s", s.deviceName, s.panelName);
-  drawText(t, Rect{30, 96, static_cast<int16_t>(w - 60), 28}, panelBuf, kFontTitle, Color::Black);
-
+  snprintf(panelBuf, sizeof(panelBuf), "%s · %s", s.deviceName, s.panelName);
+  drawText(t, Rect{hx, static_cast<int16_t>(hwCard.y + 42), hw, 28}, panelBuf, kFontTitle, Color::Black);
   char slotBuf[64];
-  snprintf(slotBuf, sizeof(slotBuf), "Altro slot OTA: %s",
-           (s.otherFirmware && s.otherFirmware[0]) ? s.otherFirmware : "nessuno");
-  drawText(t, Rect{30, 126, static_cast<int16_t>(w - 60), 22}, slotBuf, kFontSmall, Color::Black);
-
-  // Heap gauge
-  uint8_t heapPct = 68;
+  snprintf(slotBuf, sizeof(slotBuf), "Altro slot: %s", (s.otherFirmware && s.otherFirmware[0]) ? s.otherFirmware : "vuoto");
+  drawText(t, Rect{hx, static_cast<int16_t>(hwCard.y + 72), hw, 22}, slotBuf, kFontSmall, Color::Black);
   char heapBuf[64];
+  uint8_t heapPct = 0;
   if (s.freeHeap > 0) {
     const uint32_t freeKb = s.freeHeap / 1024;
-    const uint32_t maxKb = s.largestBlock / 1024;
     heapPct = static_cast<uint8_t>(freeKb > 140 ? 100 : (freeKb * 100) / 140);
-    snprintf(heapBuf, sizeof(heapBuf), "SRAM Libera: %lu KB  ( Blocco max: %lu KB )",
-             static_cast<unsigned long>(freeKb), static_cast<unsigned long>(maxKb));
+    snprintf(heapBuf, sizeof(heapBuf), "RAM libera %lu KB · blocco max %lu KB", static_cast<unsigned long>(freeKb),
+             static_cast<unsigned long>(s.largestBlock / 1024));
   } else {
-    snprintf(heapBuf, sizeof(heapBuf), "SRAM Simulatore: Budget X3 attivo (78 KB arene)");
+    snprintf(heapBuf, sizeof(heapBuf), "RAM: non misurata (simulatore)");
   }
-  drawText(t, Rect{30, 156, static_cast<int16_t>(w - 60), 22}, heapBuf, kFontSmall, Color::Black);
-  drawSegmentedBar(t, Rect{30, 184, static_cast<int16_t>(w - 60), 18}, heapPct, 12, false);
+  drawText(t, Rect{hx, static_cast<int16_t>(hwCard.y + 96), hw, 22}, heapBuf, kFontSmall, Color::Black);
+  drawSegmentedBar(t, Rect{hx, static_cast<int16_t>(hwCard.y + 122), hw, 16}, heapPct, 12, false);
 
-  // 2. IMU Gyro / Accelerometer Radar Card + Sensor Grid
-  const Rect imuCard{16, 252, static_cast<int16_t>(w - 32), 210};
+  // 2. Sensors: accelerometer bubble + readouts.
   drawCard(t, imuCard, 8, 4, false, true);
-  drawPill(t, 30, 264, 24, "GIROSCOPIO IMU & SENSORI", kFontMicro, true, 10);
-
-  // Radar Crosshair on the left
-  const int16_t rcx = 104;
-  const int16_t rcy = 368;
-  strokeCircle(t, rcx, rcy, 56, 2, Color::Black);
-  strokeCircle(t, rcx, rcy, 32, 1, Color::Black);
-  t.line(Point{static_cast<int16_t>(rcx - 58), rcy}, Point{static_cast<int16_t>(rcx + 58), rcy}, 1,
-         Paint::solid(Color::Black));
-  t.line(Point{rcx, static_cast<int16_t>(rcy - 58)}, Point{rcx, static_cast<int16_t>(rcy + 58)}, 1,
-         Paint::solid(Color::Black));
-
+  drawPill(t, static_cast<int16_t>(imuCard.x + 14), static_cast<int16_t>(imuCard.y + 12), 24, "SENSORI", kFontMicro,
+           true, 10);
+  const int16_t rcx = static_cast<int16_t>(imuCard.x + 70);
+  const int16_t rcy = static_cast<int16_t>(imuCard.y + 104);
+  const int16_t rr = 50;
+  strokeCircle(t, rcx, rcy, rr, 2, Color::Black);
+  strokeCircle(t, rcx, rcy, 28, 1, Color::Black);
+  fastFill(t, Rect{static_cast<int16_t>(rcx - rr), rcy, static_cast<int16_t>(2 * rr), 1}, Paint::solid(Color::Black));
+  fastFill(t, Rect{rcx, static_cast<int16_t>(rcy - rr), 1, static_cast<int16_t>(2 * rr)}, Paint::solid(Color::Black));
   int16_t bx = rcx, by = rcy;
   if (s.imuReady) {
     int dx = static_cast<int>(s.ax * 40.0f);
     int dy = static_cast<int>(-s.ay * 40.0f);
-    if (dx < -44) dx = -44;
-    if (dx > 44) dx = 44;
-    if (dy < -44) dy = -44;
-    if (dy > 44) dy = 44;
+    dx = dx < -40 ? -40 : (dx > 40 ? 40 : dx);
+    dy = dy < -40 ? -40 : (dy > 40 ? 40 : dy);
     bx = static_cast<int16_t>(rcx + dx);
     by = static_cast<int16_t>(rcy + dy);
   }
   fillCircle(t, bx, by, 8, Color::Black);
   fillCircle(t, bx, by, 3, Color::White);
 
-  // Right-side sensor readouts
-  const int16_t sx = 186;
-  const int16_t sw = static_cast<int16_t>(w - sx - 30);
+  const int16_t sx = static_cast<int16_t>(imuCard.x + 136);
+  const int16_t sw = static_cast<int16_t>(imuCard.right() - sx - 12);
   char imuTxt[56], rtcTxt[56], sdTxt[48], btnTxt[56];
   if (s.imuReady) {
-    snprintf(imuTxt, sizeof(imuTxt), "X: %+.2fg  Y: %+.2fg  Z: %+.2fg", s.ax, s.ay, s.az);
+    snprintf(imuTxt, sizeof(imuTxt), "X %+.2f  Y %+.2f  Z %+.2f", s.ax, s.ay, s.az);
   } else {
-    snprintf(imuTxt, sizeof(imuTxt), "Sensore QMI8658: non rilevato");
+    snprintf(imuTxt, sizeof(imuTxt), "Accelerometro assente");
   }
   if (s.clockValid) {
-    snprintf(rtcTxt, sizeof(rtcTxt), "RTC DS3231: %02u:%02u · %02u/%02u/%04u", s.hour, s.minute, s.day, s.month,
-             s.year);
+    snprintf(rtcTxt, sizeof(rtcTxt), "Orologio %02u:%02u · %02u/%02u/%04u", s.hour, s.minute, s.day, s.month, s.year);
   } else {
-    snprintf(rtcTxt, sizeof(rtcTxt), "RTC DS3231: ora non impostata");
+    snprintf(rtcTxt, sizeof(rtcTxt), "Orologio non impostato");
   }
-  snprintf(sdTxt, sizeof(sdTxt), "MicroSD SPI: %s", s.sdReady ? "PRONTA (FAT/exFAT)" : "ASSENTE");
+  snprintf(sdTxt, sizeof(sdTxt), "microSD %s", s.sdReady ? "pronta" : "ASSENTE");
   if (s.lastButton) {
-    snprintf(btnTxt, sizeof(btnTxt), "Input ADC: %s (#%lu)", s.lastButton,
-             static_cast<unsigned long>(s.buttonPresses));
+    snprintf(btnTxt, sizeof(btnTxt), "Tasto %s (#%lu)", s.lastButton, static_cast<unsigned long>(s.buttonPresses));
   } else {
-    snprintf(btnTxt, sizeof(btnTxt), "Input ADC: in attesa di pressione");
+    snprintf(btnTxt, sizeof(btnTxt), "Premi un tasto per provarlo");
   }
+  drawText(t, Rect{sx, static_cast<int16_t>(imuCard.y + 46), sw, 24}, imuTxt, fitFont(t, imuTxt, sw, kFontBody), Color::Black);
+  drawText(t, Rect{sx, static_cast<int16_t>(imuCard.y + 76), sw, 22}, rtcTxt, kFontSmall, Color::Black);
+  drawText(t, Rect{sx, static_cast<int16_t>(imuCard.y + 102), sw, 22}, sdTxt, kFontSmall, Color::Black);
+  drawText(t, Rect{sx, static_cast<int16_t>(imuCard.y + 128), sw, 22}, btnTxt, kFontSmall, Color::Black);
 
-  drawText(t, Rect{sx, 300, sw, 26}, imuTxt, kFontBody, Color::Black);
-  drawText(t, Rect{sx, 336, sw, 24}, rtcTxt, kFontSmall, Color::Black);
-  drawText(t, Rect{sx, 368, sw, 24}, sdTxt, kFontSmall, Color::Black);
-  drawText(t, Rect{sx, 400, sw, 24}, btnTxt, kFontSmall, Color::Black);
-
-  // 3. Battery & Power Management Card
-  const Rect pwrCard{16, 476, static_cast<int16_t>(w - 32), 160};
+  // 3. Battery.
   drawCard(t, pwrCard, 8, 4, false, false);
-  drawPill(t, 30, 488, 24, "ALIMENTAZIONE & STATO", kFontMicro, true, 10);
-
+  const int16_t px = static_cast<int16_t>(pwrCard.x + 14);
+  const int16_t pw = static_cast<int16_t>(pwrCard.width - 28);
+  drawPill(t, px, static_cast<int16_t>(pwrCard.y + 12), 24, "ALIMENTAZIONE", kFontMicro, true, 10);
   char battLine[64];
   if (s.batteryPercent >= 0) {
-    snprintf(battLine, sizeof(battLine), "Batteria BQ27220: %d%% %s", s.batteryPercent,
-             s.charging ? "(In carica via USB)" : "(Scarica attiva)");
+    snprintf(battLine, sizeof(battLine), "Batteria %d%%%s", s.batteryPercent, s.charging ? " · in carica" : "");
   } else {
-    snprintf(battLine, sizeof(battLine), "Batteria BQ27220: telemetria simulata");
+    snprintf(battLine, sizeof(battLine), "Batteria: lettura non disponibile");
   }
-  drawText(t, Rect{30, 522, static_cast<int16_t>(w - 60), 26}, battLine, kFontBody, Color::Black);
-  drawProgressBar(t, Rect{30, 556, static_cast<int16_t>(w - 60), 18},
-                  static_cast<uint8_t>(s.batteryPercent >= 0 ? s.batteryPercent : 85), false);
-
+  drawText(t, Rect{px, static_cast<int16_t>(pwrCard.y + 44), pw, 26}, battLine, kFontBody, Color::Black);
+  drawProgressBar(t, Rect{px, static_cast<int16_t>(pwrCard.y + 76), pw, 16},
+                  static_cast<uint8_t>(s.batteryPercent >= 0 ? s.batteryPercent : 0), false);
   if (s.notice && s.notice[0]) {
-    drawPill(t, 30, 590, 28, s.notice, kFontSmall, true, 14);
+    drawPill(t, px, static_cast<int16_t>(pwrCard.y + 100), 24, s.notice, kFontSmall, true, 12);
   } else {
-    drawText(t, Rect{30, 588, static_cast<int16_t>(w - 60), 26},
-             "Tieni premuto BACK per 3 secondi per avviare l'altro slot firmware.", kFontSmall, Color::Black);
+    drawText(t, Rect{px, static_cast<int16_t>(pwrCard.y + 100), pw, 22}, "Power: riposo · tieni 1 s: spegni",
+             kFontSmall, Color::Black);
   }
 
-  // 4. Bottom escape banner
-  const Rect tipCard{16, 650, static_cast<int16_t>(w - 32), 86};
+  // 4. Escape hatches.
   drawCard(t, tipCard, 8, 0, true, false);
-  drawText(t, Rect{30, 660, static_cast<int16_t>(w - 60), 28}, "PREMI OK: AVVIA CYBER-NET WI-FI & DAILY INK",
-           kFontBody, Color::White, TextAlign::Center, false);
-  drawText(t, Rect{30, 692, static_cast<int16_t>(w - 60), 24},
-           "Power 1s: Spegni X3   ·   Back 3s: Cambia Slot OTA", kFontSmall, Color::White, TextAlign::Center, false);
+  drawText(t, Rect{static_cast<int16_t>(tipCard.x + 12), static_cast<int16_t>(tipCard.y + 10),
+                   static_cast<int16_t>(tipCard.width - 24), 30},
+           "OK: Wi-Fi e portale web", kFontBody, Color::White, TextAlign::Center, false);
+  drawText(t, Rect{static_cast<int16_t>(tipCard.x + 12), static_cast<int16_t>(tipCard.y + 46),
+                   static_cast<int16_t>(tipCard.width - 24), 26},
+           "BACK tenuto 3 s: avvia l'altro firmware", kFontSmall, Color::White, TextAlign::Center, false);
 
-  drawBottomKeyBar(t, "OK", "Cyber-Net Wi-Fi", "BACK", "Torna a Home", "BACK 3s", "Altro Slot");
+  drawBottomKeyBar(t, "OK", "Wi-Fi", "BACK", "Home", "BACK 3s", "Altro slot");
 }
+
+namespace {
+
+// Draws a bold Swiss / Bauhaus geometric astrolabe & horizon composition when
+// no EPUB cover image is available for the lock screen.
+void drawArchitecturalWallpaper(DrawTarget& t, Rect box, const DeviceStatus* status) {
+  fastFill(t, box, Paint::solid(Color::Black), 10);
+
+  const int16_t cx = static_cast<int16_t>(box.x + box.width / 2);
+  const int16_t cy = static_cast<int16_t>(box.y + box.height / 2 - 24);
+  const int16_t maxR = static_cast<int16_t>((box.width < box.height ? box.width : box.height) / 2 - 28);
+
+  // Lower horizon band with crisp diagonal / horizontal scanlines
+  const int16_t horizonY = static_cast<int16_t>(cy + maxR / 2);
+  const Rect lowerBand{static_cast<int16_t>(box.x + 12), horizonY, static_cast<int16_t>(box.width - 24),
+                       static_cast<int16_t>(box.bottom() - horizonY - 12)};
+  if (lowerBand.height > 20) {
+    fastFill(t, lowerBand, Paint::solid(Color::White), 6);
+    fillScanlines(t, lowerBand, 4, Color::Black);
+    fastStroke(t, lowerBand, Paint::solid(Color::White), 2, 6);
+  }
+
+  // Concentric astrolabe rings
+  strokeCircle(t, cx, cy, maxR, 2, Color::White);
+  if (maxR > 40) strokeCircle(t, cx, cy, static_cast<int16_t>(maxR - 18), 1, Color::White);
+  if (maxR > 80) strokeCircle(t, cx, cy, static_cast<int16_t>(maxR - 42), 2, Color::White);
+
+  // Precision crosshairs
+  fastFill(t, Rect{static_cast<int16_t>(box.x + 20), cy, static_cast<int16_t>(box.width - 40), 1},
+           Paint::solid(Color::White));
+  fastFill(t, Rect{cx, static_cast<int16_t>(box.y + 20), 1, static_cast<int16_t>(box.height - 40)},
+           Paint::solid(Color::White));
+
+  // Inner geometric eclipse disc
+  const int16_t innerR = static_cast<int16_t>(maxR > 90 ? 52 : 34);
+  fillCircle(t, cx, cy, innerR, Color::White);
+  fillCircle(t, static_cast<int16_t>(cx + innerR / 3), static_cast<int16_t>(cy - innerR / 4),
+             static_cast<int16_t>(innerR - 8), Color::Black);
+
+  // Corner degree ticks
+  drawPill(t, static_cast<int16_t>(box.x + 18), static_cast<int16_t>(box.y + 16), 22, "528×792 E-INK", kFontMicro,
+           false, 8);
+  if (status && status->clockValid) {
+    char clk[16];
+    snprintf(clk, sizeof(clk), "%02u:%02u", static_cast<unsigned>(status->hour), static_cast<unsigned>(status->minute));
+    const int16_t cw = static_cast<int16_t>(textWidth(t, clk, kFontMicro) + 18);
+    drawPill(t, static_cast<int16_t>(box.right() - 18 - cw), static_cast<int16_t>(box.y + 16), 22, clk, kFontMicro,
+             false, 8);
+  }
+
+  // Center badge at bottom of artBox
+  const int16_t badgeW = static_cast<int16_t>(box.width - 64);
+  const Rect plate{static_cast<int16_t>(box.x + 32), static_cast<int16_t>(box.bottom() - 56), badgeW, 38};
+  fastFill(t, plate, Paint::solid(Color::Black), 8);
+  fastStroke(t, plate, Paint::solid(Color::White), 2, 8);
+  drawText(t, plate, "INKLING OS · E-READER", kFontBody, Color::White, TextAlign::Center, false);
+}
+
+}  // namespace
 
 void sleepScreen(UiApp::ScreenType& screen, void* user) {
   auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const int16_t h = kScreenH;
-  const auto* app = static_cast<const InklingApp*>(user);
+  const int16_t w = screenW();
+  const int16_t h = screenH();
+  const bool land = isLandscape();
+  auto* app = static_cast<InklingApp*>(user);
 
   clearScreen();
+  const Rect outer{10, 10, static_cast<int16_t>(w - 20), static_cast<int16_t>(h - 20)};
+  drawCard(t, outer, 12, 4, false, true);
 
-  // Outer poster frame
-  const Rect outer{14, 14, static_cast<int16_t>(w - 28), static_cast<int16_t>(h - 28)};
-  drawCard(t, outer, 12, 5, false, true);
+  // Top status strip inside the lock frame
+  const int16_t ix = 24;
+  const int16_t iw = static_cast<int16_t>(w - 48);
+  drawPill(t, ix, 22, 24, "XTEINK X3 // IN RIPOSO", kFontMicro, true, 10);
 
-  // Top Header Strip
-  const Rect hdr{28, 28, static_cast<int16_t>(w - 56), 44};
-  fastFill(t, hdr, Paint::solid(Color::Black), 8);
-  drawText(t, Rect{44, 32, 240, 36}, "INKLING X3 // RIPOSO", kFontBody, Color::White, TextAlign::Left, false);
-  drawPill(t, static_cast<int16_t>(w - 168), 38, 24, "ZERO ENERGIA", kFontMicro, false, 10);
-
-  // Starry Night Observatory Card with Sleeping Companion
-  const Rect sky{28, 84, static_cast<int16_t>(w - 56), 370};
-  fastFill(t, sky, Paint::solid(Color::Black), 10);
-
-  // Crescent Moon & Stars on dark background
-  fillCircle(t, static_cast<int16_t>(w - 92), 144, 28, Color::White);
-  fillCircle(t, static_cast<int16_t>(w - 80), 134, 24, Color::Black);
-
-  static constexpr int16_t kStars[][2] = {
-      {64, 118},  {118, 152}, {176, 110}, {244, 136}, {310, 114},
-      {72, 210},  {140, 245}, {360, 210}, {430, 238}, {96, 310},
-  };
-  for (const auto& st : kStars) {
-    fastFill(t, Rect{st[0], st[1], 3, 3}, Paint::solid(Color::White));
-  }
-  // Constellation lines
-  t.line(Point{64, 118}, Point{118, 152}, 1, Paint::solid(Color::White));
-  t.line(Point{118, 152}, Point{176, 110}, 1, Paint::solid(Color::White));
-  t.line(Point{176, 110}, Point{244, 136}, 1, Paint::solid(Color::White));
-
-  const PetStage stg = app ? app->pet().stage() : PetStage::Glyph;
-  drawInklingSprite(t, static_cast<int16_t>(w / 2), 286, 4, stg, PetMood::Sleepy, 0, true);
-
-  drawPill(t, static_cast<int16_t>(w / 2 - 90), 398, 28,
-           app ? app->pet().stageName() : "Custode dei Sogni", kFontSmall, false, 16);
-
-  // Reading & Companion Summary Card at the bottom of the poster
-  const Rect info{28, 470, static_cast<int16_t>(w - 56), 216};
-  drawCard(t, info, 10, 4, false, true);
-
+  char statusRight[40] = "STANDBY";
   if (app) {
-    char statsLine[64];
-    snprintf(statsLine, sizeof(statsLine), "LV.%u  ·  STREAK %u GIORNI  ·  %lu PAGINE LETTE",
-             static_cast<unsigned>(app->pet().state().level),
-             static_cast<unsigned>(app->pet().state().streakDays),
-             static_cast<unsigned long>(app->pet().state().totalPagesRead));
-    drawPill(t, 44, 486, 26, statsLine, kFontMicro, true, 12);
+    const auto& st = app->status();
+    if (st.clockValid && st.batteryPercent >= 0) {
+      snprintf(statusRight, sizeof(statusRight), "%02u:%02u · %d%%", static_cast<unsigned>(st.hour),
+               static_cast<unsigned>(st.minute), st.batteryPercent);
+    } else if (st.batteryPercent >= 0) {
+      snprintf(statusRight, sizeof(statusRight), "BATTERIA %d%%", st.batteryPercent);
+    }
+  }
+  const int16_t srW = static_cast<int16_t>(textWidth(t, statusRight, kFontMicro) + 20);
+  drawPill(t, static_cast<int16_t>(ix + iw - srW), 22, 24, statusRight, kFontMicro, false, 10);
 
-    const int idx = app->activeBookIndex();
-    if (idx >= 0 && idx < app->library().count()) {
+  const int idx = app ? app->activeBookIndex() : -1;
+  const bool hasBook = (app && idx >= 0 && idx < app->library().count());
+
+  if (!land) {
+    // Portrait (528x792): Large Book Cover Poster (480x556) + Sleek Editorial Footer (480x146)
+    const Rect artBox{ix, 54, iw, 556};
+    fillDotGrid(t, artBox, 6, Color::Black);
+    fastStroke(t, artBox, Paint::solid(Color::Black), 2, 10);
+
+    bool drewCover = false;
+    if (hasBook && app->reader()) {
+      drewCover = app->reader()->drawCoverInBox(t, app->library().at(idx).path, artBox);
+    }
+    if (!drewCover) {
+      drawArchitecturalWallpaper(t, artBox, app ? &app->status() : nullptr);
+    }
+
+    const Rect info{ix, 620, iw, 148};
+    drawCard(t, info, 10, 3, false, true);
+    const int16_t tx = static_cast<int16_t>(info.x + 16);
+    const int16_t tw = static_cast<int16_t>(info.width - 32);
+
+    if (hasBook) {
       const auto& b = app->library().at(idx);
-      drawBookCover(t, 44, 526, b.name, b.author, nullptr);
-      drawText(t, Rect{124, 526, static_cast<int16_t>(w - 168), 30}, b.name, kFontTitle, Color::Black);
-      drawText(t, Rect{124, 558, static_cast<int16_t>(w - 168), 24}, b.author, kFontSmall, Color::Black);
-      drawProgressBar(t, Rect{124, 592, static_cast<int16_t>(w - 228), 18}, b.progressPct, false);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 10), tw, 28}, b.name, kFontTitle, Color::Black);
+      const char* author = (b.author[0] != '\0') ? b.author : "Volume EPUB su microSD";
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 40), static_cast<int16_t>(tw - 70), 22}, author, kFontSmall,
+               Color::Black);
       char pctTxt[16];
       snprintf(pctTxt, sizeof(pctTxt), "%u%%", static_cast<unsigned>(b.progressPct));
-      drawText(t, Rect{static_cast<int16_t>(w - 98), 588, 54, 24}, pctTxt, kFontBody, Color::Black, TextAlign::Right,
-               false);
-      drawText(t, Rect{124, 620, static_cast<int16_t>(w - 168), 22},
-               "Segnalibro e stato del Pet salvati su microSD.", kFontSmall, Color::Black);
+      drawText(t, Rect{static_cast<int16_t>(tx + tw - 64), static_cast<int16_t>(info.y + 38), 64, 24}, pctTxt,
+               kFontBody, Color::Black, TextAlign::Right, false);
+      drawProgressBar(t, Rect{tx, static_cast<int16_t>(info.y + 68), tw, 14}, b.progressPct, false);
     } else {
-      drawText(t, Rect{44, 536, static_cast<int16_t>(w - 88), 32},
-               "Sogni d'inchiostro in corso...", kFontTitle, Color::Black, TextAlign::Center, false);
-      drawText(t, Rect{44, 576, static_cast<int16_t>(w - 88), 26},
-               "Al risveglio riprenderemo da dove avevi lasciato.", kFontSmall, Color::Black, TextAlign::Center,
-               false);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 18), tw, 28}, "Nessun volume attivo", kFontTitle, Color::Black,
+               TextAlign::Center, false);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 50), tw, 22}, "Al risveglio tornerai alla schermata Home",
+               kFontSmall, Color::Black, TextAlign::Center, false);
     }
-  } else {
-    drawPill(t, 44, 490, 26, "STATO SALVATO SU MICROSD", kFontMicro, true, 12);
-    drawText(t, Rect{44, 538, static_cast<int16_t>(w - 88), 34}, "Zzz... Sogni d'inchiostro", kFontTitle, Color::Black,
-             TextAlign::Center, false);
-    drawText(t, Rect{44, 580, static_cast<int16_t>(w - 88), 26},
-             "Il tuo compagno riposa senza consumare batteria.", kFontSmall, Color::Black, TextAlign::Center, false);
-  }
 
-  // Bottom wake prompt
-  const Rect wake{28, 704, static_cast<int16_t>(w - 56), 54};
-  fastFill(t, wake, Paint::solid(Color::Black), 8);
-  drawText(t, wake, "PREMI POWER PER RISVEGLIARE INKLING X3", kFontBody, Color::White, TextAlign::Center, false);
+    const Rect wake{static_cast<int16_t>(info.x + 12), static_cast<int16_t>(info.bottom() - 48),
+                    static_cast<int16_t>(info.width - 24), 36};
+    fastFill(t, wake, Paint::solid(Color::Black), 8);
+    drawText(t, wake, "PREMI POWER PER RIPRENDERE", kFontSmall, Color::White, TextAlign::Center, false);
+  } else {
+    // Landscape (792x528): Left Book Cover Showcase (356x448) + Right Editorial Card (376x448)
+    const Rect artBox{ix, 54, 356, 448};
+    fillDotGrid(t, artBox, 6, Color::Black);
+    fastStroke(t, artBox, Paint::solid(Color::Black), 2, 10);
+
+    bool drewCover = false;
+    if (hasBook && app->reader()) {
+      drewCover = app->reader()->drawCoverInBox(t, app->library().at(idx).path, artBox);
+    }
+    if (!drewCover) {
+      drawArchitecturalWallpaper(t, artBox, app ? &app->status() : nullptr);
+    }
+
+    const int16_t rx = static_cast<int16_t>(artBox.right() + 12);
+    const Rect info{rx, 54, static_cast<int16_t>(ix + iw - rx), 448};
+    drawCard(t, info, 10, 3, false, true);
+    const int16_t tx = static_cast<int16_t>(info.x + 18);
+    const int16_t tw = static_cast<int16_t>(info.width - 36);
+
+    if (hasBook) {
+      const auto& b = app->library().at(idx);
+      drawPill(t, tx, static_cast<int16_t>(info.y + 18), 24, b.started ? "IN LETTURA" : "IN LIBRERIA", kFontMicro,
+               true, 10);
+      TextStyle ts;
+      ts.font = static_cast<freeink::ui::FontId>(kFontTitle);
+      ts.color = Color::Black;
+      ts.maxLines = 3;
+      t.text(Rect{tx, static_cast<int16_t>(info.y + 56), tw, 92}, b.name, ts);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 154), tw, 24}, b.author[0] ? b.author : " ", kFontBody,
+               Color::Black);
+
+      fastFill(t, Rect{tx, static_cast<int16_t>(info.y + 194), tw, 2}, Paint::solid(Color::Black));
+
+      char progLbl[40];
+      snprintf(progLbl, sizeof(progLbl), "AVANZAMENTO LETTURA · %u%%", static_cast<unsigned>(b.progressPct));
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 212), tw, 22}, progLbl, kFontMicro, Color::Black);
+      drawProgressBar(t, Rect{tx, static_cast<int16_t>(info.y + 240), tw, 18}, b.progressPct, false);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 276), tw, 22}, "Segnalibro sincronizzato su microSD",
+               kFontSmall, Color::Black);
+    } else {
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 120), tw, 32}, "INKLING X3", kFontTitle, Color::Black,
+               TextAlign::Center, false);
+      drawText(t, Rect{tx, static_cast<int16_t>(info.y + 164), tw, 24}, "Dispositivo in modalità riposo", kFontSmall,
+               Color::Black, TextAlign::Center, false);
+    }
+
+    const Rect wake{static_cast<int16_t>(info.x + 14), static_cast<int16_t>(info.bottom() - 54),
+                    static_cast<int16_t>(info.width - 28), 40};
+    fastFill(t, wake, Paint::solid(Color::Black), 8);
+    drawText(t, wake, "PREMI POWER PER RIPRENDERE", kFontSmall, Color::White, TextAlign::Center, false);
+  }
 }
 
 void messageScreen(UiApp::ScreenType& screen, void* user) {
   auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const int16_t h = kScreenH;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
   const char* msg = static_cast<const char*>(user);
 
   clearScreen();
   fillDotGrid(t, Rect{0, 0, w, h}, 8, Color::Black);
 
-  const Rect card{36, static_cast<int16_t>(h / 2 - 140), static_cast<int16_t>(w - 72), 280};
+  const Rect card{36, static_cast<int16_t>(h / 2 - 120), static_cast<int16_t>(w - 72), 240};
   drawCard(t, card, 12, 6, false, true);
 
   const Rect hdr{static_cast<int16_t>(card.x + 12), static_cast<int16_t>(card.y + 12),
@@ -247,15 +338,17 @@ void messageScreen(UiApp::ScreenType& screen, void* user) {
   fastFill(t, hdr, Paint::solid(Color::Black), 6);
   drawText(t, hdr, "INKLING OS // SISTEMA", kFontBody, Color::White, TextAlign::Center, false);
 
-  drawInklingSprite(t, static_cast<int16_t>(w / 2), static_cast<int16_t>(card.y + 118), 2, PetStage::Drop,
-                    PetMood::Focused, 0, false);
+  const int16_t cx = static_cast<int16_t>(w / 2);
+  const int16_t cy = static_cast<int16_t>(card.y + 92);
+  fillCircle(t, cx, cy, 20, Color::Black);
+  drawIcon16(t, static_cast<int16_t>(cx - 8), static_cast<int16_t>(cy - 8), Icon::Book, Color::White);
 
   TextStyle st;
   st.font = static_cast<freeink::ui::FontId>(kFontTitle);
   st.color = Color::Black;
   st.align = TextAlign::Center;
   st.maxLines = 3;
-  t.text(Rect{static_cast<int16_t>(card.x + 24), static_cast<int16_t>(card.y + 168),
+  t.text(Rect{static_cast<int16_t>(card.x + 24), static_cast<int16_t>(card.y + 126),
               static_cast<int16_t>(card.width - 48), 92},
          msg ? msg : "...", st);
 }
@@ -263,8 +356,8 @@ void messageScreen(UiApp::ScreenType& screen, void* user) {
 void otaScreen(UiApp::ScreenType& screen, void* user) {
   const auto& v = *static_cast<const OtaView*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const int16_t h = kScreenH;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
 
   clearScreen();
   fillDotGrid(t, Rect{0, 0, w, h}, 8, Color::Black);
@@ -330,10 +423,10 @@ void otaScreen(UiApp::ScreenType& screen, void* user) {
            "Apri l'indirizzo http:// qui sopra per inviare EPUB o Note", kFontSmall, Color::Black);
 
   drawIcon16(t, 54, 566, Icon::Compass, Color::Black);
-  drawText(t, Rect{78, 560, static_cast<int16_t>(w - 130), 26}, "3. GIOCO HACKER BREACH (Locale su X3)", kFontBody,
+  drawText(t, Rect{78, 560, static_cast<int16_t>(w - 130), 26}, "3. AGGIORNAMENTO OTA SENZA FILI", kFontBody,
            Color::Black);
   drawText(t, Rect{78, 586, static_cast<int16_t>(w - 130), 24},
-           "Premi BACK: trovi il gioco nel Santuario Pet o in Libreria!", kFontSmall, Color::Black);
+           "Invia il firmware .bin dal Mac con scripts/ota.sh o dal browser", kFontSmall, Color::Black);
 
   char verLine[64];
   snprintf(verLine, sizeof(verLine), "Build: %s · http://inkling.local",

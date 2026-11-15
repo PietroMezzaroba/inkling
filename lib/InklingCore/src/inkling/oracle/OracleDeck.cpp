@@ -200,7 +200,8 @@ void OracleDeck::onShake() {
 void OracleDeck::render(freeink::ui::DrawTarget& t, const DeviceStatus& status) {
   (void)status;
   clearScreen();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
   const auto& card = currentCard();
 
   // Top HUD Bar
@@ -209,7 +210,60 @@ void OracleDeck::render(freeink::ui::DrawTarget& t, const DeviceStatus& status) 
   snprintf(cardIdxPill, sizeof(cardIdxPill), "CARTA #%02d / %02d", currentIdx_ + 1, totalCards());
   drawPill(t, static_cast<int16_t>(w - 110), 8, 22, cardIdxPill, ui::kFontMicro, false, 8);
 
-  // Big Hero Oracle Card (y=40..736)
+  const char* deckTag = (deckType_ == OracleDeckType::DailyStoic) ? "DAILY STOIC // FILOSOFIA VISSUTA"
+                                                                  : "OBLIQUE STRATEGIES // BRIAN ENO";
+
+  if (w > h) {
+    // Landscape widescreen layout (792x528)
+    const Rect frameRect{14, 36, static_cast<int16_t>(w - 28), 442};
+    drawCard(t, frameRect, 12, 4, false, true);
+    fastStroke(t, Rect{24, 46, static_cast<int16_t>(w - 48), 422}, Paint::solid(Color::Black), 1, 8);
+
+    const int16_t leftW = 420;
+    drawPill(t, 36, 58, 24, deckTag, ui::kFontMicro, true, 12);
+    if (justShuffled_) {
+      drawPill(t, 310, 58, 24, "SHUFFLE (IMU)!", ui::kFontMicro, false, 8);
+    }
+
+    drawText(t, Rect{38, 92, 50, 44}, "\"", ui::kFontHero, Color::Black);
+
+    TextStyle quoteStyle;
+    quoteStyle.font = static_cast<freeink::ui::FontId>(ui::kFontTitle);
+    quoteStyle.color = Color::Black;
+    quoteStyle.align = TextAlign::Left;
+    quoteStyle.maxLines = 5;
+    t.text(Rect{40, 134, leftW, 186}, card.quote, quoteStyle);
+
+    const int16_t divY = 336;
+    for (int16_t x = 40; x < 40 + leftW; x += 8) {
+      fastFill(t, Rect{x, divY, 4, 1}, Paint::solid(Color::Black), 0);
+    }
+
+    drawText(t, Rect{40, 352, leftW, 28}, card.author, ui::kFontBody, Color::Black);
+    drawText(t, Rect{40, 382, leftW, 22}, card.source, ui::kFontSmall, Color::Black);
+    drawText(t, Rect{40, 434, leftW, 18},
+             "Suggerimento: scuoti fisicamente l'X3 per pescare!", ui::kFontMicro, Color::Black);
+
+    const int16_t rightX = 480;
+    const int16_t rightW = static_cast<int16_t>(w - rightX - 36);
+    const Rect actionBox{rightX, 58, rightW, 398};
+    fastFill(t, actionBox, Paint::solid(Color::Black), 8);
+    fastStroke(t, actionBox, Paint::solid(Color::White), 2, 8);
+    drawPill(t, static_cast<int16_t>(rightX + 14), 74, 22, "SPUNTO PRATICO", ui::kFontMicro, false, 10);
+
+    TextStyle actStyle;
+    actStyle.font = static_cast<freeink::ui::FontId>(ui::kFontBody);
+    actStyle.color = Color::White;
+    actStyle.align = TextAlign::Left;
+    actStyle.maxLines = 8;
+    t.text(Rect{static_cast<int16_t>(rightX + 16), 114, static_cast<int16_t>(rightW - 32), 320}, card.takeaway,
+           actStyle);
+
+    drawBottomKeyBar(t, "DESTRA", "Altro Mazzo", "OK", "Nuova Carta", "BACK", "Esci");
+    return;
+  }
+
+  // Big Hero Oracle Card (Portrait 528x792: y=40..736)
   const Rect frameRect{14, 40, static_cast<int16_t>(w - 28), 696};
   drawCard(t, frameRect, 12, 4, false, true);
 
@@ -217,8 +271,6 @@ void OracleDeck::render(freeink::ui::DrawTarget& t, const DeviceStatus& status) 
   fastStroke(t, Rect{24, 50, static_cast<int16_t>(w - 48), 676}, Paint::solid(Color::Black), 1, 8);
 
   // Deck Mode Header Pill inside card
-  const char* deckTag = (deckType_ == OracleDeckType::DailyStoic) ? "DAILY STOIC // FILOSOFIA VISSUTA"
-                                                                  : "OBLIQUE STRATEGIES // BRIAN ENO";
   drawPill(t, 34, 62, 24, deckTag, ui::kFontMicro, true, 12);
 
   if (justShuffled_) {

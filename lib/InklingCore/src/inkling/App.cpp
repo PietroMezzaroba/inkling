@@ -59,7 +59,11 @@ static constexpr AlignPreset kAlignPresets[] = {
 constexpr uint8_t kAlignPresetCount = sizeof(kAlignPresets) / sizeof(kAlignPresets[0]);
 
 constexpr const char* kPrefsPath = "/.inkling/prefs.bin";
+constexpr const char* kReadingStatsPath = "/.inkling/reading.bin";
+// last.txt: the book to reopen at boot (cleared when the user closes it).
+// recent.txt: the most recent book, never cleared, for "Continua" and Home.
 constexpr const char* kLastBookPath = "/.inkling/last.txt";
+constexpr const char* kRecentBookPath = "/.inkling/recent.txt";
 constexpr const char* kResumeLockPath = "/.inkling/resume.lock";
 
 struct Prefs {
@@ -73,6 +77,16 @@ struct Prefs {
   uint8_t reserved[2];
 };
 constexpr uint32_t kPrefsMagic = 0x334B4E49u;  // "INK3"
+
+struct ReadingStatsRecord {
+  uint32_t magic;
+  uint32_t totalPages;
+  int32_t lastReadDay;
+  uint16_t dailyPages;
+  uint16_t streakDays;
+};
+constexpr uint32_t kReadingStatsMagic = 0x54534452u;  // "RDST"
+constexpr uint16_t kDailyPageGoal = 15;
 
 enum ReaderMenuItem : int {
   kMenuContinue = 0,
@@ -92,14 +106,16 @@ enum SettingsItem : int {
   kSetRotation = 0,
   kSetInvertKeys = 1,
   kSetAutoSleep = 2,
-  kSetWakeSensitivity = 3,
-  kSetRefreshCadence = 4,
-  kSetDeskWidget = 5,
-  kSetTheme = 6,
-  kSetWifiOta = 7,
-  kSetDiagnostic = 8,
-  kSetCount = 9,
+  kSetRefreshCadence = 3,
+  kSetDeskWidget = 4,
+  kSetTheme = 5,
+  kSetWifiOta = 6,
+  kSetDiagnostic = 7,
+  kSetCount = 8,
 };
+
+// Library rows after the books: Diagnostica, Wi-Fi.
+constexpr int kLibrarySystemRows = 2;
 
 enum HomeDockItem : int {
   kDockRead = 0,
@@ -109,14 +125,6 @@ enum HomeDockItem : int {
   kDockRpg = 4,
   kDockSystem = 5,
   kDockCount = 6,
-};
-
-enum SanctuaryAction : int {
-  kActFeed = 0,
-  kActPet = 1,
-  kActLamp = 2,
-  kActRead = 3,
-  kActCount = 4,
 };
 
 }  // namespace
@@ -135,11 +143,100 @@ void InklingApp::Menu::move(int delta) {
   nav.followPending = true;
 }
 
+Button spatialButton(Button b, Orientation o) {
+  // Front keys Left/Right sit on the short edge below the screen at 0°, the
+  // Up/Down rocker on the side: rotating the device rotates them with it.
+  switch (o) {
+    case Orientation::PortraitInverted:
+      switch (b) {
+        case Button::Left:  return Button::Right;
+        case Button::Right: return Button::Left;
+        case Button::Up:    return Button::Down;
+        case Button::Down:  return Button::Up;
+        default:            return b;
+      }
+    case Orientation::LandscapeClockwise:  // keys on the left, Left key on top
+      switch (b) {
+        case Button::Left:  return Button::Up;
+        case Button::Right: return Button::Down;
+        case Button::Up:    return Button::Right;
+        case Button::Down:  return Button::Left;
+        default:            return b;
+      }
+    case Orientation::LandscapeCounterClockwise:  // keys on the right, Right key on top
+      switch (b) {
+        case Button::Left:  return Button::Down;
+        case Button::Right: return Button::Up;
+        case Button::Up:    return Button::Left;
+        case Button::Down:  return Button::Right;
+        default:            return b;
+      }
+    case Orientation::Portrait:
+    default:
+      return b;
+  }
+}
+
+bool InklingApp::modeSupportsLandscape(Mode mode) {
+  (void)mode;
+  return true;
+}
+
+void InklingApp::enterMode(Mode mode, UiApp::ScreenFn fn, void* user, RefreshHint hint) {
+  mode_ = mode;
+  applyOrientation();  // may rotate (and relayout the book) before the first frame
+  cursorOnlyRedraw_ = false;
+  ui_.setScreen(fn, user, hint);
+}
+
+void InklingApp::setDesiredOrientation(Orientation orient) {
+  desiredOrientation_ = orient;
+  applyOrientation();
+}
+
+void InklingApp::applyOrientation() {
+  if (!orientationFn_) return;
+  Orientation effective = desiredOrientation_;
+  if (isLandscape(effective) && !modeSupportsLandscape(mode_)) effective = Orientation::Portrait;
+  if (effective != orientation_) orientationFn_(effective, orientationUser_);
+}
+
+void InklingApp::onOrientationChanged(Orientation orient) {
+  if (orient == orientation_) return;
+  const bool shapeChanged = isLandscape(orient) != isLandscape(orientation_);
+  orientation_ = orient;
+  frame_.rotation = frameRotationFor(orient);
+  canvas::setCanvasOrientation(orient);
+  // The page size changes with the shape: lay the open chapter out again. The
+  // reading position is a character offset, so the same sentence stays on screen.
+  if (shapeChanged && reader_ && reader_->isOpen()) {
+    reader_->relayout(currentLayout());
+    reader_->prepare();
+    layoutDirty_ = false;
+    turnsSinceFull_ = 0;
+  }
+  // Every partial-redraw shortcut assumed the old pixel layout.
+  needsReaderBackdrop_ = true;
+  cursorOnlyRedraw_ = false;
+  ui_.invalidate(RefreshHint::Full);
+}
+
+int InklingApp::homeDockColumns() const { return isLandscape() ? 3 : 2; }
+
+bool InklingApp::loadBookThumb(const char* bookPath, uint8_t outBits[ui::canvas::kCoverBytes]) const {
+  if (!bookPath || !bookPath[0]) return false;
+  char thumbPath[64];
+  Library::coverThumbPathFor(bookPath, thumbPath, sizeof(thumbPath));
+  return storage_.readFile(thumbPath, outBits, ui::canvas::kCoverBytes) ==
+         static_cast<int32_t>(ui::canvas::kCoverBytes);
+}
+
 InklingApp::InklingApp(Storage& storage, BookReader* reader, DeviceStatus& status, UiApp& ui,
                        const freeink::book::FrameTarget& frame)
     : storage_(storage), reader_(reader), status_(status), ui_(ui), frame_(frame) {
   canvas::bindFramebuffer(frame_.framebuffer, frame_.width, frame_.height, frame_.widthBytes);
   canvas::setCanvasOrientation(orientation_);
+  frame_.rotation = frameRotationFor(orientation_);
 }
 
 LocalTime InklingApp::currentLocalTime() const {
@@ -176,20 +273,18 @@ void InklingApp::begin() {
   storage_.mkdirs("/.inkling");
   settings_.load(storage_);
   desk_.setSubWidget(static_cast<DeskSubWidget>(settings_.deskWidget));
-  nightMode_ = settings_.nightMode;
-  if (settings_.rotationMode == RotationMode::LockPortrait) {
-    requestOrientation(freeink::ui::Orientation::Portrait);
-  } else if (settings_.rotationMode == RotationMode::LockInverted) {
-    requestOrientation(freeink::ui::Orientation::PortraitInverted);
-  }
   loadPrefs();
+  nightMode_ = settings_.nightMode;  // settings.bin is the one source of truth
+  Orientation locked;
+  if (settings_.lockedOrientation(locked)) setDesiredOrientation(locked);
   library_.scan(storage_);
-  pet_.load(storage_, currentLocalTime());
+  if (reader_) {
+    reader_->precacheLibrary(library_);
+  }
+  rpg_.load(storage_);
   homeDock_.reset(kDockCount, 0);
   settingsMenu_.reset(kSetCount, 0);
-  sanctuaryMenu_.reset(kActCount, 0);
-  INKLING_LOG("library: %d books, pet lv %u (%lu pages)", library_.count(),
-              static_cast<unsigned>(pet_.state().level), static_cast<unsigned long>(pet_.state().totalPagesRead));
+  INKLING_LOG("library: %d books, %lu pages read", library_.count(), static_cast<unsigned long>(totalPagesRead_));
 
   char last[128] = {};
   char lock = '0';
@@ -198,6 +293,13 @@ void InklingApp::begin() {
   if (n > 0) {
     last[n] = '\0';
     snprintf(lastBookPath_, sizeof(lastBookPath_), "%s", last);
+  } else {
+    char recent[128] = {};
+    const int32_t r = storage_.readFile(kRecentBookPath, recent, sizeof(recent) - 1);
+    if (r > 0) {
+      recent[r] = '\0';
+      snprintf(lastBookPath_, sizeof(lastBookPath_), "%s", recent);
+    }
   }
 
   if (lock == '1') {
@@ -212,75 +314,45 @@ void InklingApp::begin() {
 }
 
 void InklingApp::showHome() {
-  pet_.syncTime(currentLocalTime());
-  pet_.stepAnim();
   if (homeDock_.count != kDockCount) homeDock_.reset(kDockCount, 0);
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Home;
-  ui_.setScreen(homeScreen, this, RefreshHint::Fast);
+  enterMode(Mode::Home, homeScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::showLibrary() {
   int select = activeBookIndex();
   if (select < 0) select = 0;
-  // Rows: books + "Santuario Pet", "Hacker Matrix: Breach", "Diagnostica", "Aggiornamento Wi-Fi"
-  libraryMenu_.reset(library_.count() + 4, select);
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Library;
-  ui_.setScreen(libraryScreen, this, RefreshHint::Fast);
+  // Rows: books + "Diagnostica", "Wi-Fi: giornale e libri"
+  libraryMenu_.reset(library_.count() + kLibrarySystemRows, select);
+  enterMode(Mode::Library, libraryScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::showDeskAmbient() {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::DeskAmbient;
-  ui_.setScreen(deskAmbientScreen, this, RefreshHint::Full);
+  enterMode(Mode::DeskAmbient, deskAmbientScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::showOracle() {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Oracle;
-  ui_.setScreen(oracleScreen, this, RefreshHint::Fast);
+  enterMode(Mode::Oracle, oracleScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::showTextRpg() {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::TextRpg;
-  ui_.setScreen(textRpgScreen, this, RefreshHint::Fast);
+  enterMode(Mode::TextRpg, textRpgScreen, this, RefreshHint::Clean);
 }
 
-void InklingApp::showSettings() {
+void InklingApp::showSettings(bool fromReader) {
+  settingsFromReader_ = fromReader;
+  diagnosticFromSettings_ = false;
+  if (fromReader) applyPendingLayout();
   settingsMenu_.reset(kSetCount, 0);
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Settings;
-  ui_.setScreen(settingsScreen, this, RefreshHint::Fast);
-}
-
-void InklingApp::showPetSanctuary() {
-  pet_.syncTime(currentLocalTime());
-  pet_.stepAnim();
-  if (sanctuaryMenu_.count != kActCount) sanctuaryMenu_.reset(kActCount, 0);
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::PetSanctuary;
-  ui_.setScreen(petSanctuaryScreen, this, RefreshHint::Fast);
-}
-
-void InklingApp::showBreachGame() {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::BreachGame;
-  ui_.setScreen(breachGameScreen, this, RefreshHint::Fast);
+  enterMode(Mode::Settings, settingsScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::showDiagnostic() {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Diagnostic;
-  ui_.setScreen(diagnosticScreen, &status_, RefreshHint::Fast);
+  enterMode(Mode::Diagnostic, diagnosticScreen, &status_, RefreshHint::Clean);
 }
 
 void InklingApp::showMessage(const char* text) {
   snprintf(message_, sizeof(message_), "%s", text);
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Message;
-  ui_.setScreen(messageScreen, message_, RefreshHint::Fast);
+  enterMode(Mode::Message, messageScreen, message_, RefreshHint::Full);
 }
 
 void InklingApp::flush(RefreshHint hint) {
@@ -296,7 +368,7 @@ void InklingApp::update() {
 
 void InklingApp::shutdown() {
   if (reader_) reader_->close();
-  pet_.save(storage_);
+  savePrefs();
 }
 
 void InklingApp::loadPrefs() {
@@ -309,6 +381,14 @@ void InklingApp::loadPrefs() {
     if (p.alignStep < kAlignPresetCount) alignStep_ = p.alignStep;
     focusReading_ = (p.focusReading != 0);
     nightMode_ = (p.nightMode != 0);
+  }
+  ReadingStatsRecord rs{};
+  if (storage_.readFile(kReadingStatsPath, &rs, sizeof(rs)) == static_cast<int32_t>(sizeof(rs)) &&
+      rs.magic == kReadingStatsMagic) {
+    totalPagesRead_ = rs.totalPages;
+    lastReadDay_ = rs.lastReadDay;
+    dailyPages_ = rs.dailyPages;
+    streakDays_ = rs.streakDays;
   }
 }
 
@@ -324,17 +404,54 @@ void InklingApp::savePrefs() {
       {0, 0},
   };
   storage_.writeFile(kPrefsPath, &p, sizeof(p));
+
+  const ReadingStatsRecord rs{
+      kReadingStatsMagic,
+      totalPagesRead_,
+      lastReadDay_,
+      dailyPages_,
+      streakDays_,
+  };
+  storage_.writeFile(kReadingStatsPath, &rs, sizeof(rs));
+}
+
+void InklingApp::recordPageRead() {
+  ++totalPagesRead_;
+  const LocalTime now = currentLocalTime();
+  if (now.valid) {
+    const int32_t today = dayNumber(now.year, now.month, now.day);
+    if (lastReadDay_ != today) {
+      if (lastReadDay_ == today - 1) {
+        ++streakDays_;
+      } else {
+        streakDays_ = 1;
+      }
+      lastReadDay_ = today;
+      dailyPages_ = 0;
+    }
+  } else if (streakDays_ == 0) {
+    streakDays_ = 1;
+  }
+  ++dailyPages_;
+  rpg_.grantReadingBonus(1);
+  rpg_.save(storage_);
+  savePrefs();
 }
 
 ReaderLayout InklingApp::currentLayout() const {
   ReaderLayout layout;
-  layout.pageHeight = static_cast<int16_t>(frame_.width - kStatusLineHeight);
+  // frame_ describes the panel (792x528); the page is the logical screen
+  // minus the status bar, so it swaps with the orientation.
+  const bool landscape = isLandscape(orientation_);
+  layout.pageWidth = landscape ? frame_.width : frame_.height;
+  layout.pageHeight = static_cast<int16_t>((landscape ? frame_.height : frame_.width) - kStatusLineHeight);
   layout.fontFamily = fontFamily_ < kFontFamilyCount ? fontFamily_ : 0;
   layout.fontSizePx = kFontSizes[fontStep_ < kFontSizeCount ? fontStep_ : 3];
   const auto& sp = kSpacingPresets[spacingStep_ < kSpacingPresetCount ? spacingStep_ : 0];
   layout.lineSpacingPct = sp.lineSpacingPct;
   layout.paragraphSpacingPct = sp.paraSpacingPct;
-  layout.marginH = sp.marginH;
+  // Landscape lines are 50% longer: wider margins keep the measure readable.
+  layout.marginH = static_cast<int16_t>(sp.marginH + (landscape ? 28 : 0));
   layout.marginTop = sp.marginTop;
   layout.marginBottom = 14;
   const auto& al = kAlignPresets[alignStep_ < kAlignPresetCount ? alignStep_ : 0];
@@ -367,18 +484,10 @@ void InklingApp::openSelected() {
   const int books = library_.count();
   const int row = libraryMenu_.selected;
   if (row == books) {
-    showPetSanctuary();
-    return;
-  }
-  if (row == books + 1) {
-    showBreachGame();
-    return;
-  }
-  if (row == books + 2) {
     showDiagnostic();
     return;
   }
-  if (row == books + 3) {
+  if (row == books + 1) {
     if (request_) {
       showMessage("Avvio Cyber-Net Wi-Fi & Portale Web...");
       flush(RefreshHint::Fast);
@@ -422,28 +531,36 @@ bool InklingApp::openBook(const char* path, bool resuming) {
   }
   snprintf(lastBookPath_, sizeof(lastBookPath_), "%s", path);
   storage_.writeFile(kLastBookPath, path, static_cast<uint32_t>(strlen(path)));
+  storage_.writeFile(kRecentBookPath, path, static_cast<uint32_t>(strlen(path)));
   const auto prep = reader_->prepare();
   INKLING_LOG("opened, first chapter: %s", freeink::book::bookStatusName(prep));
   library_.refreshSummaries(storage_);
-  pet_.resetSessionPages();
   resumePending_ = resuming;
   turnsSinceFull_ = 0;
-  showReader(RefreshHint::Fast);
+  showReader(RefreshHint::Full);
   return true;
 }
 
 void InklingApp::closeBook() {
+  applyPendingLayout();  // keep the user's last typography change
   if (reader_) reader_->close();
-  pet_.save(storage_);
+  savePrefs();
   storage_.writeFile(kLastBookPath, "", 0);
   library_.refreshSummaries(storage_);
   showHome();
 }
 
+void InklingApp::applyPendingLayout() {
+  if (layoutDirty_ && reader_ && reader_->isOpen()) {
+    reader_->relayout(currentLayout());
+    reader_->prepare();
+    turnsSinceFull_ = 0;
+  }
+  layoutDirty_ = false;
+}
+
 void InklingApp::showReader(RefreshHint hint) {
-  cursorOnlyRedraw_ = false;
-  mode_ = Mode::Reader;
-  ui_.setScreen(readerScreen, this, hint);
+  enterMode(Mode::Reader, readerScreen, this, hint);
 }
 
 void InklingApp::turnPage(bool forward) {
@@ -452,9 +569,7 @@ void InklingApp::turnPage(bool forward) {
   reader_->prepare();
 
   if (forward) {
-    pet_.onPageRead(storage_, currentLocalTime(), chapterFlipped, reader_->atEnd());
-  } else {
-    pet_.consumeBannerTick();
+    recordPageRead();
   }
 
   if (++turnsSinceFull_ >= settings_.fullRefreshPages()) {
@@ -468,37 +583,25 @@ void InklingApp::turnPage(bool forward) {
 void InklingApp::showReaderMenu() {
   // When opening ReaderMenu directly from Reader, the book page is ALREADY in
   // frame_.framebuffer — no need to re-decode or re-rasterize the book page!
-  needsReaderBackdrop_ = (mode_ != Mode::Reader);
-  cursorOnlyRedraw_ = false;
-  layoutDirty_ = false;
+  needsReaderBackdrop_ = needsReaderBackdrop_ || (mode_ != Mode::Reader);
   readerMenu_.reset(kMenuCount, kMenuContinue);
-  mode_ = Mode::ReaderMenu;
-  ui_.setScreen(readerMenuScreen, this, RefreshHint::Fast);
+  enterMode(Mode::ReaderMenu, readerMenuScreen, this, RefreshHint::Fast);
 }
 
 void InklingApp::exitReaderMenu() {
-  if (layoutDirty_ && reader_ && reader_->isOpen()) {
-    reader_->relayout(currentLayout());
-    turnsSinceFull_ = 0;
-  }
-  layoutDirty_ = false;
-  showReader(RefreshHint::Fast);
+  applyPendingLayout();
+  showReader(RefreshHint::Clean);
 }
 
 void InklingApp::showToc() {
-  if (layoutDirty_ && reader_ && reader_->isOpen()) {
-    reader_->relayout(currentLayout());
-    layoutDirty_ = false;
-  }
+  applyPendingLayout();
   const int entries = static_cast<int>(reader_->tocCount());
   if (entries == 0) {
-    showReader(RefreshHint::Fast);
+    showReader(RefreshHint::Clean);
     return;
   }
-  cursorOnlyRedraw_ = false;
   tocMenu_.reset(entries, reader_->currentTocIndex());
-  mode_ = Mode::Toc;
-  ui_.setScreen(tocScreen, this, RefreshHint::Fast);
+  enterMode(Mode::Toc, tocScreen, this, RefreshHint::Clean);
 }
 
 void InklingApp::adjustMenuItem(int item, int delta) {
@@ -558,13 +661,14 @@ void InklingApp::adjustMenuItem(int item, int delta) {
     }
     case kMenuNightMode:
       nightMode_ = !nightMode_;
+      settings_.nightMode = nightMode_;
+      settings_.save(storage_);
       break;
     case kMenuSettings:
-      showSettings();
+      showSettings(true);
       return;
     case kMenuHome:
-      if (reader_) reader_->close();
-      showPetSanctuary();
+      closeBook();
       return;
     default:
       return;
@@ -584,7 +688,7 @@ void InklingApp::runMenuItem(int item) {
     case kMenuSpacing:      adjustMenuItem(kMenuSpacing, 1); break;
     case kMenuAlignment:    adjustMenuItem(kMenuAlignment, 1); break;
     case kMenuNightMode:    adjustMenuItem(kMenuNightMode, 1); break;
-    case kMenuSettings:     showSettings(); break;
+    case kMenuSettings:     showSettings(true); break;
     case kMenuHome:         closeBook(); break;
     default:                break;
   }
@@ -604,20 +708,22 @@ void InklingApp::runHomeDockItem(int item) {
 
 void InklingApp::adjustSettingItem(int item, int delta) {
   switch (item) {
-    case kSetRotation:
+    case kSetRotation: {
       settings_.cycleRotationMode(delta);
-      if (settings_.rotationMode == RotationMode::LockPortrait) {
-        requestOrientation(freeink::ui::Orientation::Portrait);
-      } else if (settings_.rotationMode == RotationMode::LockInverted) {
-        requestOrientation(freeink::ui::Orientation::PortraitInverted);
-      } else if (settings_.rotationMode == RotationMode::Auto) {
-        if (prevAy_ < -0.40f) {
-          requestOrientation(freeink::ui::Orientation::Portrait);
-        } else if (prevAy_ > 0.40f) {
-          requestOrientation(freeink::ui::Orientation::PortraitInverted);
+      Orientation locked;
+      if (settings_.lockedOrientation(locked)) {
+        setDesiredOrientation(locked);
+      } else if (status_.imuReady) {
+        // Automatic: follow how the device is held right now.
+        Orientation now;
+        if (OrientationTracker::classify(status_.ax, status_.ay, status_.az, settings_.autoAllowsLandscape(), now)) {
+          setDesiredOrientation(now);
+        } else if (!settings_.autoAllowsLandscape() && isLandscape(desiredOrientation_)) {
+          setDesiredOrientation(Orientation::Portrait);
         }
       }
       break;
+    }
 
     case kSetInvertKeys:
       settings_.cycleInvertKeys();
@@ -625,10 +731,6 @@ void InklingApp::adjustSettingItem(int item, int delta) {
 
     case kSetAutoSleep:
       settings_.cycleAutoSleep(delta);
-      break;
-
-    case kSetWakeSensitivity:
-      settings_.cycleWakeSensitivity(delta);
       break;
 
     case kSetRefreshCadence:
@@ -655,7 +757,7 @@ void InklingApp::adjustSettingItem(int item, int delta) {
   }
   settings_.save(storage_);
   cursorOnlyRedraw_ = false;
-  ui_.invalidate(RefreshHint::Fast);
+  ui_.invalidate(item == kSetTheme ? RefreshHint::Clean : RefreshHint::Fast);
 }
 
 void InklingApp::runSettingItem(int item) {
@@ -665,34 +767,11 @@ void InklingApp::runSettingItem(int item) {
       if (request_) request_(Request::WifiUpdate, requestUser_);
       break;
     case kSetDiagnostic:
+      diagnosticFromSettings_ = true;
       showDiagnostic();
       break;
     default:
       adjustSettingItem(item, 1);
-      break;
-  }
-}
-
-void InklingApp::runSanctuaryAction(int item) {
-  switch (item) {
-    case kActFeed:
-      pet_.feedInkCrystal(storage_);
-      cursorOnlyRedraw_ = false;
-      ui_.invalidate(RefreshHint::Fast);
-      break;
-    case kActPet:
-      pet_.interact(storage_, false);
-      showBreachGame();
-      break;
-    case kActLamp:
-      pet_.toggleNightLamp(storage_);
-      cursorOnlyRedraw_ = false;
-      ui_.invalidate(RefreshHint::Fast);
-      break;
-    case kActRead:
-      openActiveOrFirstBook();
-      break;
-    default:
       break;
   }
 }
@@ -713,17 +792,92 @@ void InklingApp::onImuSample(float ax, float ay, float az) {
       oracle_.onShake();
       cursorOnlyRedraw_ = false;
       ui_.invalidate(RefreshHint::Fast);
-    } else if (mode_ == Mode::Home || mode_ == Mode::PetSanctuary) {
-      pet_.interact(storage_, true);
-      cursorOnlyRedraw_ = false;
-      ui_.invalidate(RefreshHint::Fast);
-    } else if (mode_ == Mode::BreachGame) {
-      breach_.triggerEmpBlast();
-      cursorOnlyRedraw_ = true;
-      ui_.invalidate(RefreshHint::Fast);
     }
   }
 }
+
+namespace {
+
+constexpr int16_t kHudH = 40;         // drawTopHud
+constexpr int16_t kKeyBarH = 38;      // drawBottomKeyBar
+constexpr int16_t kMargin = 14;
+constexpr int16_t kGap = 12;
+constexpr int16_t kMinCardH = 124;    // library cards: cover (92) + margins
+
+int16_t contentTop() { return static_cast<int16_t>(kHudH + 6); }
+int16_t contentBottom() { return static_cast<int16_t>(screenH() - kKeyBarH - 6); }
+
+// First item of the page that contains `sel` when `perPage` items fit.
+int pageFirst(int sel, int count, int perPage) {
+  if (perPage <= 0) return 0;
+  int first = (sel / perPage) * perPage;
+  if (first > count - perPage) first = count - perPage;
+  return first < 0 ? 0 : first;
+}
+
+int libraryPerPage() {
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t gapY = 10;
+  const int16_t listTop = static_cast<int16_t>(contentTop() + 30);
+  const int16_t listBottom = contentBottom();
+  int rowsFit = (listBottom - listTop + gapY) / (kMinCardH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  return rowsFit * cols;
+}
+
+int settingsPerPage() {
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t listTop = static_cast<int16_t>(contentTop() + 26);
+  const int16_t listBottom = contentBottom();
+  const int16_t gapY = 8;
+  constexpr int16_t kCardMinH = 116;
+  int rowsFit = (listBottom - listTop + gapY) / (kCardMinH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  return rowsFit * cols;
+}
+
+int readerMenuPerPage() {
+  const int16_t h = screenH();
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t modalBottom = static_cast<int16_t>(h - kKeyBarH - 16);
+  const int16_t gridTop = 80;
+  const int16_t gridBottom = static_cast<int16_t>(modalBottom - 14);
+  const int16_t gapY = 12;
+  constexpr int16_t kCardMinH = 116;
+  int rowsFit = (gridBottom - gridTop + gapY) / (kCardMinH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  return rowsFit * cols;
+}
+
+int tocPerPage() {
+  const int16_t listTop = static_cast<int16_t>(contentTop() + 2 + 64 + 12);
+  const int16_t listBottom = contentBottom();
+  const int16_t rowH = 58;
+  const int16_t gapY = 8;
+  int perPage = (listBottom - listTop + gapY) / (rowH + gapY);
+  return perPage < 1 ? 1 : perPage;
+}
+
+// "3/12" page indicator when a list does not fit one screen.
+void drawPageDots(DrawTarget& t, int16_t rightX, int16_t y, int sel, int count, int perPage) {
+  if (perPage <= 0 || count <= perPage) return;
+  const int pages = (count + perPage - 1) / perPage;
+  const int page = sel / perPage;
+  const int16_t dot = 8;
+  const int16_t step = 14;
+  int16_t x = static_cast<int16_t>(rightX - pages * step);
+  for (int i = 0; i < pages; ++i) {
+    const Rect d{x, y, dot, dot};
+    if (i == page) {
+      fastFill(t, d, Paint::solid(Color::Black), 4);
+    } else {
+      fastStroke(t, d, Paint::solid(Color::Black), 1, 4);
+    }
+    x = static_cast<int16_t>(x + step);
+  }
+}
+
+}  // namespace
 
 void InklingApp::onButton(Button button) {
   const bool up = button == Button::Up || button == Button::Left;
@@ -731,11 +885,11 @@ void InklingApp::onButton(Button button) {
   switch (mode_) {
     case Mode::Home:
       if (button == Button::Up) {
-        homeDock_.move(-2);
+        homeDock_.move(-homeDockColumns());
         cursorOnlyRedraw_ = true;
         ui_.invalidate(RefreshHint::Fast);
       } else if (button == Button::Down) {
-        homeDock_.move(2);
+        homeDock_.move(homeDockColumns());
         cursorOnlyRedraw_ = true;
         ui_.invalidate(RefreshHint::Fast);
       } else if (button == Button::Left) {
@@ -756,11 +910,13 @@ void InklingApp::onButton(Button button) {
     case Mode::DeskAmbient:
       if (button == Button::Right || button == Button::Left) {
         desk_.cycleSubWidget();
+        settings_.deskWidget = static_cast<DeskWidgetType>(desk_.activeSubWidget());
+        settings_.save(storage_);
         cursorOnlyRedraw_ = false;
         ui_.invalidate(RefreshHint::Fast);
       } else if (button == Button::Confirm) {
         cursorOnlyRedraw_ = false;
-        ui_.invalidate(RefreshHint::Full);
+        ui_.invalidate(RefreshHint::Clean);
       } else if (button == Button::Back) {
         showHome();
       }
@@ -770,7 +926,7 @@ void InklingApp::onButton(Button button) {
       if (button == Button::Right || button == Button::Left) {
         oracle_.toggleDeck();
         cursorOnlyRedraw_ = false;
-        ui_.invalidate(RefreshHint::Fast);
+        ui_.invalidate(RefreshHint::Clean);
       } else if (button == Button::Confirm || button == Button::Down) {
         oracle_.nextCard();
         cursorOnlyRedraw_ = false;
@@ -803,77 +959,40 @@ void InklingApp::onButton(Button button) {
       }
       break;
 
-    case Mode::Library:
+    case Mode::Library: {
+      const int perPage = libraryPerPage();
+      const int oldFirst = pageFirst(libraryMenu_.selected, libraryMenu_.count, perPage);
       if (button == Button::Up) {
         libraryMenu_.move(-1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(libraryMenu_.selected, libraryMenu_.count, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Down || button == Button::Right) {
         libraryMenu_.move(1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(libraryMenu_.selected, libraryMenu_.count, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Confirm) {
         openSelected();
       } else if (button == Button::Back || button == Button::Left) {
         showHome();
       }
       break;
-
-    case Mode::PetSanctuary:
-      if (up || down) {
-        sanctuaryMenu_.move(up ? -1 : 1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
-      } else if (button == Button::Confirm) {
-        runSanctuaryAction(sanctuaryMenu_.selected);
-      } else if (button == Button::Back) {
-        showHome();
-      }
-      break;
-
-    case Mode::BreachGame: {
-      bool moved = false;
-      bool cleared = false;
-      if (button == Button::Up) {
-        cleared = breach_.movePlayer(0, -1);
-        moved = true;
-      } else if (button == Button::Down) {
-        cleared = breach_.movePlayer(0, 1);
-        moved = true;
-      } else if (button == Button::Left) {
-        cleared = breach_.movePlayer(-1, 0);
-        moved = true;
-      } else if (button == Button::Right) {
-        cleared = breach_.movePlayer(1, 0);
-        moved = true;
-      } else if (button == Button::Confirm) {
-        breach_.triggerEmpBlast();
-        moved = true;
-      } else if (button == Button::Back) {
-        showPetSanctuary();
-        break;
-      }
-      if (cleared) {
-        // Reward Kuro-Ink with +1 Ink Crystal & XP for every hacked Subnet!
-        pet_.onPageRead(storage_, currentLocalTime(), true, false);
-        pet_.interact(storage_, false);
-      }
-      if (moved) {
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
-      }
-      break;
     }
 
-    case Mode::Settings:
+    case Mode::Settings: {
+      const int perPage = settingsPerPage();
+      const int oldFirst = pageFirst(settingsMenu_.selected, kSetCount, perPage);
       if (button == Button::Up) {
         settingsMenu_.move(-1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(settingsMenu_.selected, kSetCount, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Down) {
         settingsMenu_.move(1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(settingsMenu_.selected, kSetCount, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Left) {
         adjustSettingItem(settingsMenu_.selected, -1);
       } else if (button == Button::Right) {
@@ -882,9 +1001,14 @@ void InklingApp::onButton(Button button) {
         runSettingItem(settingsMenu_.selected);
       } else if (button == Button::Back) {
         settings_.save(storage_);
-        showHome();
+        if (settingsFromReader_ && reader_ && reader_->isOpen()) {
+          showReaderMenu();
+        } else {
+          showHome();
+        }
       }
       break;
+    }
 
     case Mode::Reader:
       if (down) turnPage(true);
@@ -893,15 +1017,19 @@ void InklingApp::onButton(Button button) {
       if (button == Button::Back) closeBook();
       break;
 
-    case Mode::ReaderMenu:
+    case Mode::ReaderMenu: {
+      const int perPage = readerMenuPerPage();
+      const int oldFirst = pageFirst(readerMenu_.selected, kMenuCount, perPage);
       if (button == Button::Up) {
         readerMenu_.move(-1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(readerMenu_.selected, kMenuCount, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Down) {
         readerMenu_.move(1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(readerMenu_.selected, kMenuCount, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Left) {
         adjustMenuItem(readerMenu_.selected, -1);
       } else if (button == Button::Right) {
@@ -912,12 +1040,16 @@ void InklingApp::onButton(Button button) {
         exitReaderMenu();
       }
       break;
+    }
 
     case Mode::Toc:
       if (up || down) {
+        const int perPage = tocPerPage();
+        const int oldFirst = pageFirst(tocMenu_.selected, tocMenu_.count, perPage);
         tocMenu_.move(up ? -1 : 1);
-        cursorOnlyRedraw_ = true;
-        ui_.invalidate(RefreshHint::Fast);
+        const bool samePage = pageFirst(tocMenu_.selected, tocMenu_.count, perPage) == oldFirst;
+        cursorOnlyRedraw_ = samePage;
+        ui_.invalidate(samePage ? RefreshHint::Fast : RefreshHint::Clean);
       } else if (button == Button::Confirm) {
         char title[8];
         const int spine = reader_->tocEntry(static_cast<size_t>(tocMenu_.selected), title, sizeof(title), nullptr);
@@ -926,7 +1058,7 @@ void InklingApp::onButton(Button button) {
           reader_->prepare();
         }
         turnsSinceFull_ = 0;
-        showReader(RefreshHint::Fast);
+        showReader(RefreshHint::Full);
       } else if (button == Button::Back) {
         showReaderMenu();
       }
@@ -934,7 +1066,12 @@ void InklingApp::onButton(Button button) {
 
     case Mode::Diagnostic:
       if (button == Button::Back) {
-        showHome();
+        if (diagnosticFromSettings_) {
+          diagnosticFromSettings_ = false;
+          enterMode(Mode::Settings, settingsScreen, this, RefreshHint::Clean);
+        } else {
+          showHome();
+        }
       } else if (button == Button::Confirm && request_) {
         showMessage("Avvio Cyber-Net Wi-Fi & Portale Web...");
         flush(RefreshHint::Fast);
@@ -951,925 +1088,568 @@ void InklingApp::onButton(Button button) {
 }
 
 // ---------------------------------------------------------------------------
-// Screen 1: HOME COMMAND CENTER
+// Screen 1: HOME
 // ---------------------------------------------------------------------------
 void InklingApp::homeScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
+  const bool land = isLandscape();
   const int activeIdx = self.activeBookIndex();
+  const int cols = self.homeDockColumns();
+  const int rows = (kDockCount + cols - 1) / cols;
+
+  // Geometry: clock + book cards on top (side by side in landscape), dock below.
+  const int16_t cardH = 130;
+  Rect clockCard, bookCard;
+  if (land) {
+    const int16_t cw = static_cast<int16_t>((w - 2 * kMargin - kGap) / 2);
+    clockCard = Rect{kMargin, contentTop(), cw, cardH};
+    bookCard = Rect{static_cast<int16_t>(kMargin + cw + kGap), contentTop(), cw, cardH};
+  } else {
+    clockCard = Rect{kMargin, contentTop(), static_cast<int16_t>(w - 2 * kMargin), cardH};
+    bookCard = Rect{kMargin, static_cast<int16_t>(clockCard.bottom() + 10), clockCard.width, cardH};
+  }
+  const int16_t dockTop = static_cast<int16_t>(bookCard.bottom() + 12);
+  const int16_t dockBottom = contentBottom();
+  const int16_t rowGap = 10;
+  const int16_t tileW = static_cast<int16_t>((w - 2 * kMargin - (cols - 1) * kGap) / cols);
+  const int16_t tileH = static_cast<int16_t>((dockBottom - dockTop - (rows - 1) * rowGap) / rows);
 
   if (self.cursorOnlyRedraw_) {
-    clearBandY(350, 726);
+    clearRect(Rect{0, static_cast<int16_t>(dockTop - 2), w, static_cast<int16_t>(dockBottom - dockTop + 8)});
   } else {
     clearScreen();
-    drawTopHud(t, self.status_, self.pet_, "HOME");
+    drawTopHud(t, self.status_, "HOME");
+    const LocalTime now = self.currentLocalTime();
 
-    // 1. Desk Ambient & Weather Preview Card (y=44..208)
-    const Rect previewCard{14, 44, static_cast<int16_t>(w - 28), 164};
-    drawCard(t, previewCard, 10, 4, false, true);
-
-    const int hour = self.status_.clockValid ? self.status_.hour : 18;
-    const int minute = self.status_.clockValid ? self.status_.minute : 25;
-    char hStr[4], mStr[4];
-    snprintf(hStr, sizeof(hStr), "%02d", hour);
-    snprintf(mStr, sizeof(mStr), "%02d", minute);
-
-    // Left: Split-Flap Clock Mini (x=26..220)
+    // Clock card: split-flap time + date on the left, today's reading on the right.
+    drawCard(t, clockCard, 10, 4, false, true);
+    char hStr[4] = "--", mStr[4] = "--";
+    if (self.status_.clockValid) {
+      snprintf(hStr, sizeof(hStr), "%02u", static_cast<unsigned>(self.status_.hour % 100));
+      snprintf(mStr, sizeof(mStr), "%02u", static_cast<unsigned>(self.status_.minute % 100));
+    }
+    const int16_t fx = static_cast<int16_t>(clockCard.x + 12);
+    const int16_t fy = static_cast<int16_t>(clockCard.y + 12);
     const int16_t flapW = 42;
     const int16_t flapH = 68;
-    const int16_t flapY = 56;
-    DeskDashboard::drawSplitFlapCard(t, 26, flapY, flapW, flapH, hStr[0]);
-    DeskDashboard::drawSplitFlapCard(t, 72, flapY, flapW, flapH, hStr[1]);
+    DeskDashboard::drawSplitFlapCard(t, fx, fy, flapW, flapH, hStr[0]);
+    DeskDashboard::drawSplitFlapCard(t, static_cast<int16_t>(fx + 46), fy, flapW, flapH, hStr[1]);
+    fillCircle(t, static_cast<int16_t>(fx + 96), static_cast<int16_t>(fy + 22), 3, Color::Black);
+    fillCircle(t, static_cast<int16_t>(fx + 96), static_cast<int16_t>(fy + 46), 3, Color::Black);
+    DeskDashboard::drawSplitFlapCard(t, static_cast<int16_t>(fx + 104), fy, flapW, flapH, mStr[0]);
+    DeskDashboard::drawSplitFlapCard(t, static_cast<int16_t>(fx + 150), fy, flapW, flapH, mStr[1]);
 
-    // Colon dots
-    fillCircle(t, 120, flapY + 22, 3, Color::Black);
-    fillCircle(t, 120, flapY + 46, 3, Color::Black);
+    char date[48];
+    formatItalianDate(now, date, sizeof(date));
+    drawText(t, Rect{fx, static_cast<int16_t>(fy + flapH + 10), 196, 22}, date[0] ? date : "Ora non impostata",
+             kFontSmall, Color::Black);
+    char power[32];
+    if (self.status_.batteryPercent >= 0) {
+      snprintf(power, sizeof(power), "Batteria %d%%%s", self.status_.batteryPercent,
+               self.status_.charging ? " · in carica" : "");
+    } else {
+      snprintf(power, sizeof(power), "%s", self.status_.charging ? "In carica" : "");
+    }
+    drawText(t, Rect{fx, static_cast<int16_t>(fy + flapH + 32), 196, 18}, power, kFontMicro, Color::Black);
 
-    DeskDashboard::drawSplitFlapCard(t, 128, flapY, flapW, flapH, mStr[0]);
-    DeskDashboard::drawSplitFlapCard(t, 174, flapY, flapW, flapH, mStr[1]);
+    const int16_t rx = static_cast<int16_t>(clockCard.x + 222);
+    const int16_t rw = static_cast<int16_t>(clockCard.right() - rx - 14);
+    drawPill(t, rx, fy, 22, "OGGI", kFontMicro, true, 10);
+    char pages[40];
+    snprintf(pages, sizeof(pages), "%u / %u pagine", static_cast<unsigned>(self.dailyPages_),
+             static_cast<unsigned>(kDailyPageGoal));
+    drawText(t, Rect{rx, static_cast<int16_t>(fy + 30), rw, 26}, pages, kFontBody, Color::Black);
+    const uint8_t goalPct = static_cast<uint8_t>(
+        self.dailyPages_ >= kDailyPageGoal ? 100 : (self.dailyPages_ * 100u) / kDailyPageGoal);
+    drawProgressBar(t, Rect{rx, static_cast<int16_t>(fy + 60), rw, 14}, goalPct, false);
+    char streak[40];
+    snprintf(streak, sizeof(streak), "Serie: %u %s", static_cast<unsigned>(self.streakDays_),
+             self.streakDays_ == 1 ? "giorno" : "giorni");
+    drawText(t, Rect{rx, static_cast<int16_t>(fy + 82), rw, 22}, streak, kFontSmall, Color::Black);
+    char libLine[48];
+    snprintf(libLine, sizeof(libLine), "%lu pag. lette · %d volumi",
+             static_cast<unsigned long>(self.totalPagesRead_), self.library_.count());
+    drawText(t, Rect{rx, static_cast<int16_t>(fy + 102), rw, 18}, libLine, kFontMicro, Color::Black);
 
-    drawText(t, Rect{26, 134, 190, 20}, "MARTEDÌ 3 NOVEMBRE", ui::kFontMicro, Color::Black);
-    drawPill(t, 26, 160, 22, "DESK STAND · TASTO [3]", ui::kFontMicro, true, 8);
-
-    // Right: Weather & Reading Telemetry (rx=236)
-    const int16_t rx = 236;
-    const int16_t rw = static_cast<int16_t>(w - rx - 26);
-
-    DeskDashboard::drawWeatherIcon(t, rx, 56, WeatherCondition::Sunny, 36);
-    drawText(t, Rect{static_cast<int16_t>(rx + 44), 58, static_cast<int16_t>(rw - 44), 22}, "18°C · Sereno",
-             ui::kFontBody, Color::Black);
-    drawText(t, Rect{static_cast<int16_t>(rx + 44), 80, static_cast<int16_t>(rw - 44), 16}, "Milano · Wi-Fi Off",
-             ui::kFontMicro, Color::Black);
-
-    // Reading Streak
-    char g3[48];
-    snprintf(g3, sizeof(g3), "Streak 7gg · %u/%u pag", static_cast<unsigned>(self.pet_.state().dailyPages),
-             static_cast<unsigned>(self.pet_.state().dailyGoal));
-    drawText(t, Rect{rx, 114, rw, 18}, g3, ui::kFontMicro, Color::Black);
-    drawProgressBar(t, Rect{rx, 136, rw, 14}, self.pet_.dailyGoalPct(), false);
-
-    drawPill(t, rx, 160, 22, "AMOR FATI // STOIC", ui::kFontMicro, false, 8);
-
-    // 2. "In Lettura Ora" Featured Book Card (y=216..344)
-    const Rect bookCard{14, 216, static_cast<int16_t>(w - 28), 128};
+    // Book card: the active (or next) book with its real dithered cover.
     drawCard(t, bookCard, 10, 3, false, false);
-
     if (activeIdx >= 0 && activeIdx < self.library_.count()) {
       const auto& b = self.library_.at(activeIdx);
-      drawBookCover(t, 28, 228, b.name, b.author, nullptr);
-
-      const int16_t bx = 108;
-      const int16_t bw = static_cast<int16_t>(w - bx - 28);
-      drawPill(t, bx, 228, 22, b.started ? "IN LETTURA ORA" : "PROSSIMA LETTURA", ui::kFontMicro, true, 10);
-
+      const int16_t coverY = static_cast<int16_t>(bookCard.y + (bookCard.height - kCoverH) / 2);
+      uint8_t coverBits[kCoverBytes];
+      const bool hasCover = self.loadBookThumb(b.path, coverBits);
+      drawBookCover(t, static_cast<int16_t>(bookCard.x + 14), coverY, b.name, b.author,
+                    hasCover ? coverBits : nullptr);
+      const int16_t bx = static_cast<int16_t>(bookCard.x + 14 + kCoverW + 16);
+      const int16_t bw = static_cast<int16_t>(bookCard.right() - bx - 14);
+      drawPill(t, bx, static_cast<int16_t>(bookCard.y + 12), 22, b.started ? "IN LETTURA" : "DA INIZIARE",
+               kFontMicro, true, 10);
       char pctBadge[16];
       snprintf(pctBadge, sizeof(pctBadge), "%u%%", static_cast<unsigned>(b.progressPct));
-      drawText(t, Rect{static_cast<int16_t>(bx + bw - 60), 228, 60, 22}, pctBadge, ui::kFontBody, Color::Black,
-               TextAlign::Right, false);
-
-      drawText(t, Rect{bx, 256, bw, 26}, b.name, ui::kFontTitle, Color::Black);
-      drawText(t, Rect{bx, 284, bw, 20}, b.author, ui::kFontSmall, Color::Black);
-      drawProgressBar(t, Rect{bx, 312, bw, 14}, b.progressPct, false);
-    } else {
-      drawIcon16(t, 34, 268, Icon::Book, Color::Black);
-      drawText(t, Rect{62, 252, static_cast<int16_t>(w - 90), 28}, "Nessun libro sulla scheda SD", ui::kFontTitle,
+      drawText(t, Rect{static_cast<int16_t>(bx + bw - 60), static_cast<int16_t>(bookCard.y + 12), 60, 22}, pctBadge,
+               kFontBody, Color::Black, TextAlign::Right, false);
+      drawText(t, Rect{bx, static_cast<int16_t>(bookCard.y + 42), bw, 28}, b.name, kFontTitle, Color::Black);
+      drawText(t, Rect{bx, static_cast<int16_t>(bookCard.y + 72), bw, 22}, b.author[0] ? b.author : " ", kFontSmall,
                Color::Black);
-      drawText(t, Rect{62, 284, static_cast<int16_t>(w - 90), 24},
-               "Copia i tuoi file .epub o .txt sulla microSD.", ui::kFontSmall, Color::Black);
+      drawProgressBar(t, Rect{bx, static_cast<int16_t>(bookCard.y + 102), bw, 14}, b.progressPct, false);
+    } else {
+      drawIcon16(t, static_cast<int16_t>(bookCard.x + 20), static_cast<int16_t>(bookCard.y + 30), Icon::Book,
+                 Color::Black);
+      drawText(t, Rect{static_cast<int16_t>(bookCard.x + 46), static_cast<int16_t>(bookCard.y + 24),
+                       static_cast<int16_t>(bookCard.width - 60), 28},
+               "Nessun libro sulla microSD", kFontTitle, Color::Black);
+      drawText(t, Rect{static_cast<int16_t>(bookCard.x + 46), static_cast<int16_t>(bookCard.y + 58),
+                       static_cast<int16_t>(bookCard.width - 60), 22},
+               "Copia file .epub, .txt o .md, o usa il Wi-Fi.", kFontSmall, Color::Black);
     }
+    drawBottomKeyBar(t, "FRECCE", "Sposta", "OK", "Apri", "BACK", "Libreria");
   }
 
-  // 3. Interactive 3x2 Cyber-Bento Dock Grid (y=354..718)
+  // Dock: 3x2 in portrait, 2x3 in landscape.
   static const char* const kDockTitles[kDockCount] = {
-      "CONTINUA LETTURA",
-      "LIBRERIA VOLUMI",
-      "DESK STAND & METEO",
-      "ORACOLO FILOSOFIA",
-      "CRIPTA DEI TOMI",
-      "IMPOSTAZIONI & SISTEMA",
+      "CONTINUA", "LIBRERIA", "OROLOGIO", "ORACOLO", "CRIPTA", "IMPOSTAZ.",
   };
   static const Icon kDockIcons[kDockCount] = {
-      Icon::Book,
-      Icon::Compass,
-      Icon::Moon,
-      Icon::Spark,
-      Icon::Flame,
-      Icon::Sliders,
+      Icon::Book, Icon::Compass, Icon::Moon, Icon::Spark, Icon::Flame, Icon::Sliders,
+  };
+  char sub0[40], sub1[40], sub4[40];
+  if (activeIdx >= 0) {
+    snprintf(sub0, sizeof(sub0), "Riprendi da %u%%", static_cast<unsigned>(self.library_.at(activeIdx).progressPct));
+  } else {
+    snprintf(sub0, sizeof(sub0), "Nessun libro");
+  }
+  snprintf(sub1, sizeof(sub1), "%d %s su microSD", self.library_.count(),
+           self.library_.count() == 1 ? "volume" : "volumi");
+  snprintf(sub4, sizeof(sub4), "Dungeon RPG · Piano %d", self.rpg_.depth());
+  const char* const subs[kDockCount] = {
+      sub0, sub1, "Desk stand e calendario", "Stoici e Oblique Strategies", sub4, "Rotazione, sleep, Wi-Fi",
   };
 
-  char sub0[40], sub1[40], sub2[40], sub3[40], sub4[40], sub5[40];
-  snprintf(sub0, sizeof(sub0), activeIdx >= 0 ? "Riprendi da %u%%" : "Apri catalogo",
-           activeIdx >= 0 ? static_cast<unsigned>(self.library_.at(activeIdx).progressPct) : 0u);
-  snprintf(sub1, sizeof(sub1), "%d %s su SD", self.library_.count(),
-           self.library_.count() == 1 ? "libro" : "libri");
-  snprintf(sub2, sizeof(sub2), "Split-Flap · 18°C Meteo");
-  snprintf(sub3, sizeof(sub3), "Daily Stoic & Brian Eno");
-  snprintf(sub4, sizeof(sub4), "Rogue RPG · Piano %d", self.rpg_.depth());
-  snprintf(sub5, sizeof(sub5), "Rotazione, Sleep, Wi-Fi");
-  const char* const subs[kDockCount] = {sub0, sub1, sub2, sub3, sub4, sub5};
-
-  const int16_t tileW = static_cast<int16_t>((w - 40) / 2);
-  const int16_t tileH = 110;
-
   for (int i = 0; i < kDockCount; ++i) {
-    const int col = i & 1;
-    const int row = i >> 1;
-    const int16_t tx = static_cast<int16_t>(14 + col * (tileW + 12));
-    const int16_t ty = static_cast<int16_t>(354 + row * (tileH + 10));
+    const int col = i % cols;
+    const int row = i / cols;
+    const int16_t tx = static_cast<int16_t>(kMargin + col * (tileW + kGap));
+    const int16_t ty = static_cast<int16_t>(dockTop + row * (tileH + rowGap));
     const bool sel = (self.homeDock_.selected == i);
     const Rect tr{tx, ty, tileW, tileH};
-
     drawCard(t, tr, 8, sel ? 4 : 2, sel, sel);
     const Color fg = sel ? Color::White : Color::Black;
-
+    const int16_t textY = static_cast<int16_t>(ty + tileH - 62);
     drawIcon16(t, static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 14), kDockIcons[i], fg);
-    if (sel) {
-      drawPill(t, static_cast<int16_t>(tx + tileW - 68), static_cast<int16_t>(ty + 12), 20, "ATTIVO",
-               ui::kFontMicro, false, 6);
-    }
-    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 42), static_cast<int16_t>(tileW - 28), 24},
-             kDockTitles[i], ui::kFontBody, fg);
-    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(ty + 72), static_cast<int16_t>(tileW - 28), 22},
-             subs[i], ui::kFontSmall, fg);
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "FRECCE", "Sposta", "OK", "Apri", "BACK", "Libreria");
+    drawText(t, Rect{static_cast<int16_t>(tx + 14), textY, static_cast<int16_t>(tileW - 28), 26}, kDockTitles[i],
+             kFontBody, fg);
+    drawText(t, Rect{static_cast<int16_t>(tx + 14), static_cast<int16_t>(textY + 28), static_cast<int16_t>(tileW - 28),
+                     22},
+             subs[i], kFontSmall, fg);
   }
   self.cursorOnlyRedraw_ = false;
 }
 
 // ---------------------------------------------------------------------------
-// Screen 2: VISUAL BOOK CATALOG (LIBRARY)
+// Screen 2: LIBRARY (books, then the system shortcuts)
 // ---------------------------------------------------------------------------
 void InklingApp::libraryScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
   const int books = self.library_.count();
-  const int totalRows = books + 4;
+  const int totalRows = books + kLibrarySystemRows;
   const int sel = self.libraryMenu_.selected;
 
+  // Cards in one column (portrait) or two (landscape).
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t gapY = 10;
+  const int16_t listTop = static_cast<int16_t>(contentTop() + 30);
+  const int16_t listBottom = contentBottom();
+  int rowsFit = (listBottom - listTop + gapY) / (kMinCardH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  // Stretch the cards to use the whole height.
+  const int16_t cardH = static_cast<int16_t>((listBottom - listTop - (rowsFit - 1) * gapY) / rowsFit);
+  const int perPage = rowsFit * cols;
+  const int16_t cardW = static_cast<int16_t>((w - 2 * kMargin - (cols - 1) * kGap) / cols);
+  const int first = pageFirst(sel, totalRows, perPage);
+
   if (self.cursorOnlyRedraw_) {
-    clearBandY(42, 750);
+    clearRect(Rect{0, contentTop(), w, static_cast<int16_t>(listBottom - contentTop() + 4)});
   } else {
     clearScreen();
-    drawTopHud(t, self.status_, self.pet_, "LIBRERIA");
+    drawTopHud(t, self.status_, "LIBRERIA");
+    drawBottomKeyBar(t, "SU/GIU", "Scorri", "OK", "Apri", "BACK", "Home");
   }
 
-  // Subheader bar with total books & current selection index
   char countTxt[48];
-  snprintf(countTxt, sizeof(countTxt), "CATALOGO (%d %s)  ·  VOCE %d/%d", books, books == 1 ? "VOLUME" : "VOLUMI",
-           sel + 1, totalRows);
-  drawText(t, Rect{18, 46, static_cast<int16_t>(w - 36), 24}, countTxt, kFontMicro, Color::Black);
+  snprintf(countTxt, sizeof(countTxt), "%d %s  ·  %d/%d", books, books == 1 ? "LIBRO" : "LIBRI", sel + 1, totalRows);
+  drawText(t, Rect{18, static_cast<int16_t>(contentTop() + 2), static_cast<int16_t>(w - 140), 22}, countTxt,
+           kFontMicro, Color::Black);
+  drawPageDots(t, static_cast<int16_t>(w - 18), static_cast<int16_t>(contentTop() + 8), sel, totalRows, perPage);
 
-  // Show a window of 4 rich cards per screen
-  constexpr int kPageCards = 4;
-  int first = (sel / kPageCards) * kPageCards;
-  if (first > totalRows - kPageCards) first = totalRows - kPageCards;
-  if (first < 0) first = 0;
-
-  const int16_t cardH = 154;
-  const int16_t gapY = 12;
-  const int16_t startY = 76;
-
-  for (int slot = 0; slot < kPageCards; ++slot) {
+  for (int slot = 0; slot < perPage; ++slot) {
     const int idx = first + slot;
     if (idx >= totalRows) break;
     const bool active = (idx == sel);
-    const int16_t cy = static_cast<int16_t>(startY + slot * (cardH + gapY));
-    const Rect cr{16, cy, static_cast<int16_t>(w - 32), cardH};
-
+    const int16_t cx = static_cast<int16_t>(kMargin + (slot % cols) * (cardW + kGap));
+    const int16_t cy = static_cast<int16_t>(listTop + (slot / cols) * (cardH + gapY));
+    const Rect cr{cx, cy, cardW, cardH};
     drawCard(t, cr, 10, active ? 5 : 3, false, active);
+    if (active) fastFill(t, Rect{cx, cy, 10, cardH}, Paint::solid(Color::Black), 5);
 
-    // Left selection rail when active
-    if (active) {
-      fastFill(t, Rect{16, cy, 12, cardH}, Paint::solid(Color::Black), 6);
-    }
-
+    const int16_t tx = static_cast<int16_t>(cx + 100);
+    const int16_t tw = static_cast<int16_t>(cr.right() - tx - 14);
     if (idx < books) {
       const auto& b = self.library_.at(idx);
-      drawBookCover(t, 36, static_cast<int16_t>(cy + 16), b.name, b.author, nullptr);
-
-      const int16_t tx = 116;
-      const int16_t tw = static_cast<int16_t>(w - tx - 32);
-
-      // Top badge: IN CORSO / DA LEGGERE / COMPLETATO
-      const char* statusTag = b.progressPct >= 99 ? "COMPLETATO" : (b.started ? "IN LETTURA" : "NUOVO VOLUME");
-      drawPill(t, tx, static_cast<int16_t>(cy + 14), 22, statusTag, kFontMicro, active, 10);
-
+      uint8_t coverBits[kCoverBytes];
+      const bool hasCover = self.loadBookThumb(b.path, coverBits);
+      drawBookCover(t, static_cast<int16_t>(cx + 22), static_cast<int16_t>(cy + (cardH - kCoverH) / 2), b.name,
+                    b.author, hasCover ? coverBits : nullptr);
+      const char* tag = b.progressPct >= 99 ? "FINITO" : (b.started ? "IN LETTURA" : "NUOVO");
+      drawPill(t, tx, static_cast<int16_t>(cy + 12), 22, tag, kFontMicro, active, 10);
       char pctStr[16];
       snprintf(pctStr, sizeof(pctStr), "%u%%", static_cast<unsigned>(b.progressPct));
-      drawText(t, Rect{static_cast<int16_t>(tx + tw - 60), static_cast<int16_t>(cy + 14), 60, 22}, pctStr, kFontBody,
+      drawText(t, Rect{static_cast<int16_t>(tx + tw - 60), static_cast<int16_t>(cy + 12), 60, 22}, pctStr, kFontBody,
                Color::Black, TextAlign::Right, false);
-
-      drawText(t, Rect{tx, static_cast<int16_t>(cy + 42), tw, 30}, b.name, kFontTitle, Color::Black);
-      drawText(t, Rect{tx, static_cast<int16_t>(cy + 74), tw, 24}, b.author, kFontSmall, Color::Black);
-      drawProgressBar(t, Rect{tx, static_cast<int16_t>(cy + 108), tw, 16}, b.progressPct, false);
+      drawText(t, Rect{tx, static_cast<int16_t>(cy + 42), tw, 28}, b.name, kFontTitle, Color::Black);
+      drawText(t, Rect{tx, static_cast<int16_t>(cy + 72), tw, 22}, b.author, kFontSmall, Color::Black);
+      drawProgressBar(t, Rect{tx, static_cast<int16_t>(cy + 102), tw, 14}, b.progressPct, false);
     } else {
-      // System & Companion Action Cards at the bottom of the library
-      const int sysIdx = idx - books;
-      const char* sysTitle = "";
-      const char* sysSub = "";
-      const char* sysBadge = "MODULO SISTEMA";
-      Icon sysIcon = Icon::Sliders;
-      if (sysIdx == 0) {
-        sysTitle = "Santuario di Kuro-Ink";
-        sysSub = "Nutri il tuo Pet con i Cristalli d'Inchiostro e vedi l'evoluzione";
-        sysBadge = "COMPAGNO PET";
-        sysIcon = Icon::Crystal;
-      } else if (sysIdx == 1) {
-        sysTitle = "GIOCO: Hacker Matrix Breach";
-        sysSub = "Gioca sullo schermo X3 · Ruba i Data-Core, evita gli ICE e usa l'EMP!";
-        sysBadge = "GIOCO LOCALE X3";
-        sysIcon = Icon::Flame;
-      } else if (sysIdx == 2) {
-        sysTitle = "Diagnostica & Giroscopio IMU";
-        sysSub = "Stato batteria, sensori 3 assi, memoria SRAM e cambio slot";
-        sysBadge = "TELEMETRIA";
-        sysIcon = Icon::Compass;
-      } else {
-        sysTitle = "Giornale Wi-Fi (ANSA) & Upload Libri";
-        sysSub = "Scarica il Giornale Quotidiano ANSA o invia libri dal browser";
-        sysBadge = "WI-FI & NOTIZIE";
-        sysIcon = Icon::Wifi;
-      }
-
-      const Rect iconBox{36, static_cast<int16_t>(cy + 26), 64, 88};
+      static const char* const kTitles[kLibrarySystemRows] = {"Diagnostica", "Wi-Fi: giornale e libri"};
+      static const char* const kSubs[kLibrarySystemRows] = {
+          "Batteria, sensori, memoria, slot", "Portale web, Daily Ink e OTA"};
+      static const char* const kBadges[kLibrarySystemRows] = {"SISTEMA", "WI-FI"};
+      static const Icon kIcons[kLibrarySystemRows] = {Icon::Compass, Icon::Wifi};
+      const int sys = idx - books;
+      const Rect iconBox{static_cast<int16_t>(cx + 22), static_cast<int16_t>(cy + (cardH - 88) / 2), 64, 88};
       fastFill(t, iconBox, Paint::solid(active ? Color::Black : Color::White), 8);
       fastStroke(t, iconBox, Paint::solid(Color::Black), 2, 8);
-      drawIcon16(t, 60, static_cast<int16_t>(cy + 62), sysIcon, active ? Color::White : Color::Black);
-
-      const int16_t tx = 116;
-      const int16_t tw = static_cast<int16_t>(w - tx - 32);
-      drawPill(t, tx, static_cast<int16_t>(cy + 18), 22, sysBadge, kFontMicro, active, 10);
-      drawText(t, Rect{tx, static_cast<int16_t>(cy + 50), tw, 30}, sysTitle, kFontTitle, Color::Black);
-      drawText(t, Rect{tx, static_cast<int16_t>(cy + 84), tw, 24}, sysSub, kFontSmall, Color::Black);
+      drawIcon16(t, static_cast<int16_t>(iconBox.x + 24), static_cast<int16_t>(iconBox.y + 36), kIcons[sys],
+                 active ? Color::White : Color::Black);
+      drawPill(t, tx, static_cast<int16_t>(cy + 12), 22, kBadges[sys], kFontMicro, active, 10);
+      drawText(t, Rect{tx, static_cast<int16_t>(cy + 44), tw, 28}, kTitles[sys], kFontTitle, Color::Black);
+      drawText(t, Rect{tx, static_cast<int16_t>(cy + 76), tw, 22}, kSubs[sys], kFontSmall, Color::Black);
     }
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "SU/GIU", "Scorri", "OK", "Apri", "BACK", "Home");
   }
   self.cursorOnlyRedraw_ = false;
 }
 
 // ---------------------------------------------------------------------------
-// Screen 3: INTERACTIVE PET SANCTUARY & EVOLUTION TREE
-// ---------------------------------------------------------------------------
-void InklingApp::petSanctuaryScreen(UiApp::ScreenType& screen, void* user) {
-  auto& self = *static_cast<InklingApp*>(user);
-  auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const int16_t bw = static_cast<int16_t>((w - 40) / 2);
-
-  if (self.cursorOnlyRedraw_) {
-    clearBandY(604, 746);
-  } else {
-    clearScreen();
-    const LocalTime now = self.currentLocalTime();
-
-    drawTopHud(t, self.status_, self.pet_, "SANTUARIO");
-
-    // 1. Large Sanctuary Habitat Card (y=48..324)
-    const Rect stageCard{14, 48, static_cast<int16_t>(w - 28), 276};
-    drawHabitatScene(t, stageCard, self.pet_, self.status_, true);
-
-    // Floating Header Badges inside Sanctuary
-    char lvTag[48];
-    snprintf(lvTag, sizeof(lvTag), "%s · LV.%u", self.pet_.stageName(),
-             static_cast<unsigned>(self.pet_.state().level));
-    drawPill(t, 28, 60, 26, lvTag, kFontMicro, true, 12);
-
-    char archTag[48];
-    snprintf(archTag, sizeof(archTag), "CLASSE: %s", self.pet_.archetypeName());
-    drawPill(t, static_cast<int16_t>(w - 236), 60, 26, archTag, kFontMicro, false, 10);
-
-    // Speech banner overlay at the bottom of the habitat
-    const Rect speech{26, 274, static_cast<int16_t>(w - 52), 40};
-    fastFill(t, speech, Paint::solid(Color::White), 6);
-    fastStroke(t, speech, Paint::solid(Color::Black), 2, 6);
-    drawText(t, Rect{38, 278, static_cast<int16_t>(w - 76), 32}, self.pet_.currentDialogue(now), kFontSmall,
-             Color::Black, TextAlign::Center);
-
-    // 2. Evolution Chain & Stage Progress Card (y=334..422)
-    const Rect evoCard{14, 334, static_cast<int16_t>(w - 28), 88};
-    drawCard(t, evoCard, 8, 3, false, false);
-
-    static const char* const kStgShort[5] = {"Spora", "Goccia", "Glifo", "Custode", "Arconte"};
-    const int curStg = static_cast<int>(self.pet_.stage());
-    const int16_t stepX = static_cast<int16_t>((w - 88) / 4);
-    for (int i = 0; i < 5; ++i) {
-      const int16_t nx = static_cast<int16_t>(44 + i * stepX);
-      const int16_t ny = 360;
-      if (i < 4) {
-        fastFill(t, Rect{nx, static_cast<int16_t>(ny - 1), stepX, 2}, Paint::solid(Color::Black));
-      }
-      fillCircle(t, nx, ny, i <= curStg ? 9 : 7, i <= curStg ? Color::Black : Color::White);
-      strokeCircle(t, nx, ny, 9, 2, Color::Black);
-      if (i == curStg) fillCircle(t, nx, ny, 3, Color::White);
-      drawText(t, Rect{static_cast<int16_t>(nx - 36), 374, 72, 20}, kStgShort[i], kFontMicro, Color::Black,
-               TextAlign::Center, false);
-    }
-
-    char nextEvoTxt[64];
-    if (curStg < 4) {
-      snprintf(nextEvoTxt, sizeof(nextEvoTxt), "Prossima evoluzione: %lu / %u pag (%u%%)",
-               static_cast<unsigned long>(self.pet_.state().totalPagesRead),
-               static_cast<unsigned>(self.pet_.pagesForNextStage()),
-               static_cast<unsigned>(self.pet_.stageProgressPct()));
-    } else {
-      snprintf(nextEvoTxt, sizeof(nextEvoTxt), "Forma Finale Astrale Raggiunta! (%lu pag)",
-               static_cast<unsigned long>(self.pet_.state().totalPagesRead));
-    }
-    drawText(t, Rect{28, 396, static_cast<int16_t>(w - 56), 20}, nextEvoTxt, kFontMicro, Color::Black,
-             TextAlign::Center, false);
-
-    // 3. Telemetry Bento Grid (4 metric cards, y=432..594)
-    const int16_t bh = 74;
-
-    auto drawMetric = [&](int col, int row, const char* label, const char* bigVal, uint8_t barPct) {
-      const int16_t mx = static_cast<int16_t>(14 + col * (bw + 12));
-      const int16_t my = static_cast<int16_t>(432 + row * (bh + 10));
-      drawCard(t, Rect{mx, my, bw, bh}, 8, 3, false, false);
-      drawText(t, Rect{static_cast<int16_t>(mx + 12), static_cast<int16_t>(my + 8), static_cast<int16_t>(bw - 24), 18},
-               label, kFontMicro, Color::Black);
-      drawText(t, Rect{static_cast<int16_t>(mx + 12), static_cast<int16_t>(my + 26), static_cast<int16_t>(bw - 24), 26},
-               bigVal, kFontBody, Color::Black);
-      drawSegmentedBar(t,
-                       Rect{static_cast<int16_t>(mx + 12), static_cast<int16_t>(my + 54),
-                            static_cast<int16_t>(bw - 24), 12},
-                       barPct, 8, false);
-    };
-
-    char v0[32], v1[32], v2[32], v3[32];
-    snprintf(v0, sizeof(v0), "%u%% Sazio", static_cast<unsigned>(self.pet_.state().satiety));
-    snprintf(v1, sizeof(v1), "%u%% Felice", static_cast<unsigned>(self.pet_.state().mood));
-    snprintf(v2, sizeof(v2), "%lu pag (%u cap)", static_cast<unsigned long>(self.pet_.state().totalPagesRead),
-             static_cast<unsigned>(self.pet_.state().chaptersFinished));
-    snprintf(v3, sizeof(v3), "%u Cristalli", static_cast<unsigned>(self.pet_.state().inkCrystals));
-
-    drawMetric(0, 0, "INCHIOSTRO VITALE", v0, self.pet_.state().satiety);
-    drawMetric(1, 0, "RISONANZA EMOTIVA", v1, self.pet_.state().mood);
-    drawMetric(0, 1, "ARCHIVIO LETTURA", v2, self.pet_.dailyGoalPct());
-    drawMetric(
-        1, 1, "RISERVA CRISTALLI", v3,
-        static_cast<uint8_t>(self.pet_.state().inkCrystals * 10 > 100 ? 100 : self.pet_.state().inkCrystals * 10));
-  }
-
-  // 4. Interactive Sanctuary Actions (4 tactile buttons, y=608..740)
-  static const char* const kActions[kActCount] = {
-      "NUTRI (-1 CRISTALLO)",
-      "MATRIX: BREACH (GIOCA)",
-      "LAMPADA ASTRALE",
-      "TORNA A LEGGERE",
-  };
-  static const Icon kActIcons[kActCount] = {Icon::Crystal, Icon::Flame, Icon::Moon, Icon::Book};
-
-  for (int i = 0; i < kActCount; ++i) {
-    const int col = i & 1;
-    const int row = i >> 1;
-    const int16_t ax = static_cast<int16_t>(14 + col * (bw + 12));
-    const int16_t ay = static_cast<int16_t>(608 + row * 62);
-    const bool sel = (self.sanctuaryMenu_.selected == i);
-    const Rect ar{ax, ay, bw, 52};
-
-    drawCard(t, ar, 8, sel ? 4 : 2, sel, false);
-    drawIcon16(t, static_cast<int16_t>(ax + 12), static_cast<int16_t>(ay + 18), kActIcons[i],
-               sel ? Color::White : Color::Black);
-    drawText(t, Rect{static_cast<int16_t>(ax + 34), static_cast<int16_t>(ay + 12), static_cast<int16_t>(bw - 42), 28},
-             kActions[i], kFontSmall, sel ? Color::White : Color::Black);
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "FRECCE", "Scegli azione", "OK", "Esegui", "BACK", "Home");
-  }
-  self.cursorOnlyRedraw_ = false;
-}
-
-// ---------------------------------------------------------------------------
-// Screen 3B: HACKER MATRIX: BREACH (Cyberpunk Neural Infiltration Game)
-// ---------------------------------------------------------------------------
-void InklingApp::breachGameScreen(UiApp::ScreenType& screen, void* user) {
-  auto& self = *static_cast<InklingApp*>(user);
-  auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const auto& b = self.breach_;
-
-  if (self.cursorOnlyRedraw_) {
-    clearBandY(44, 704);
-  } else {
-    clearScreen();
-    drawTopHud(t, self.status_, self.pet_, "MATRIX // BREACH");
-  }
-
-  // 1. Cyber-Deck & ICE Trace Telemetry Card (y=46..184)
-  const Rect hudCard{14, 46, static_cast<int16_t>(w - 28), 138};
-  drawCard(t, hudCard, 10, 4, false, true);
-
-  char lvBadge[36];
-  snprintf(lvBadge, sizeof(lvBadge), "SOTTO-RETE %02u", static_cast<unsigned>(b.level()));
-  drawPill(t, 28, 56, 26, lvBadge, kFontSmall, true, 12);
-
-  char scoreTxt[64];
-  snprintf(scoreTxt, sizeof(scoreTxt), "CORE: %u/%u  ·  EMP: %u  ·  %lu PT",
-           static_cast<unsigned>(b.totalCores() - b.coresLeft()), static_cast<unsigned>(b.totalCores()),
-           static_cast<unsigned>(b.empCharges()), static_cast<unsigned long>(b.score()));
-  drawText(t, Rect{196, 56, static_cast<int16_t>(w - 224), 26}, scoreTxt, kFontSmall, Color::Black, TextAlign::Right);
-
-  // ICE Trace Alert Bar
-  char traceLbl[48];
-  snprintf(traceLbl, sizeof(traceLbl), "TRACCIAMENTO ICE: %u%%", static_cast<unsigned>(b.iceTrace()));
-  drawText(t, Rect{28, 86, 220, 20}, traceLbl, kFontMicro, Color::Black);
-  drawSegmentedBar(t, Rect{236, 88, static_cast<int16_t>(w - 264), 16}, b.iceTrace(), 10, false);
-
-  // Live Hacker Terminal Strip inside HUD Card
-  const Rect termBox{26, 114, static_cast<int16_t>(w - 52), 56};
-  fastFill(t, termBox, Paint::solid(Color::Black), 8);
-  drawIcon16(t, 40, 134, Icon::Flame, Color::White);
-  drawText(t, Rect{66, 128, static_cast<int16_t>(w - 102), 30}, b.statusLine(), kFontSmall, Color::White);
-
-  // 2. Central 6x6 Neural Circuit Grid (y=194..696)
-  const Rect gridCard{14, 194, static_cast<int16_t>(w - 28), 502};
-  drawCard(t, gridCard, 12, 4, false, true);
-
-  const int16_t nodeSize = 68;
-  const int16_t gap = 12;
-  const int16_t startX = 30;
-  const int16_t startY = 212;
-
-  // Draw circuit traces connecting adjacent node centers
-  for (int gy = 0; gy < BreachGame::kGridH; ++gy) {
-    const int16_t cy = static_cast<int16_t>(startY + gy * (nodeSize + gap) + nodeSize / 2);
-    fastFill(t, Rect{static_cast<int16_t>(startX + nodeSize / 2), static_cast<int16_t>(cy - 1),
-                     static_cast<int16_t>((BreachGame::kGridW - 1) * (nodeSize + gap)), 3},
-             Paint::solid(Color::Black));
-  }
-  for (int gx = 0; gx < BreachGame::kGridW; ++gx) {
-    const int16_t cx = static_cast<int16_t>(startX + gx * (nodeSize + gap) + nodeSize / 2);
-    fastFill(t, Rect{static_cast<int16_t>(cx - 1), static_cast<int16_t>(startY + nodeSize / 2), 3,
-                     static_cast<int16_t>((BreachGame::kGridH - 1) * (nodeSize + gap))},
-             Paint::solid(Color::Black));
-  }
-
-  // Draw the 6x6 nodes
-  for (int gy = 0; gy < BreachGame::kGridH; ++gy) {
-    for (int gx = 0; gx < BreachGame::kGridW; ++gx) {
-      const int16_t nx = static_cast<int16_t>(startX + gx * (nodeSize + gap));
-      const int16_t ny = static_cast<int16_t>(startY + gy * (nodeSize + gap));
-      const Rect nr{nx, ny, nodeSize, nodeSize};
-      const bool isPlayer = (b.playerX() == gx && b.playerY() == gy);
-      const auto* sent = b.sentinelAt(gx, gy);
-      const auto cell = b.nodeAt(gx, gy);
-
-      if (isPlayer) {
-        drawCard(t, nr, 10, 4, true, true);
-        drawInklingSprite(t, static_cast<int16_t>(nx + nodeSize / 2), static_cast<int16_t>(ny + 24), 1,
-                          self.pet_.stage(), PetMood::Focused, self.pet_.animFrame(), true);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 42), nodeSize, 22}, "TU", kFontSmall, Color::White,
-                 TextAlign::Center, false);
-      } else if (sent != nullptr) {
-        fastFill(t, nr, Paint::solid(Color::Black), 10);
-        fastStroke(t, Rect{static_cast<int16_t>(nx + 4), static_cast<int16_t>(ny + 4),
-                           static_cast<int16_t>(nodeSize - 8), static_cast<int16_t>(nodeSize - 8)},
-                   Paint::solid(Color::White), 2, 6);
-        drawIcon16(t, static_cast<int16_t>(nx + nodeSize / 2 - 8), static_cast<int16_t>(ny + 12), Icon::Compass,
-                   Color::White);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 36), nodeSize, 24},
-                 sent->stunTurns > 0 ? "STUN" : "ICE", kFontBody, Color::White, TextAlign::Center, false);
-      } else if (cell == BreachGame::Node::DataCore) {
-        drawCard(t, nr, 10, 3, false, true);
-        drawIcon16(t, static_cast<int16_t>(nx + nodeSize / 2 - 8), static_cast<int16_t>(ny + 12), Icon::Crystal,
-                   Color::Black);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 36), nodeSize, 24}, "CORE", kFontBody, Color::Black,
-                 TextAlign::Center, false);
-      } else if (cell == BreachGame::Node::Uplink) {
-        const bool open = b.uplinkOpen();
-        drawCard(t, nr, 10, open ? 4 : 2, open, true);
-        const Color fg = open ? Color::White : Color::Black;
-        drawIcon16(t, static_cast<int16_t>(nx + nodeSize / 2 - 8), static_cast<int16_t>(ny + 12),
-                   open ? Icon::Check : Icon::Wifi, fg);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 36), nodeSize, 24}, open ? "EXIT" : "LOCK", kFontBody, fg,
-                 TextAlign::Center, false);
-      } else if (cell == BreachGame::Node::Firewall) {
-        fastFill(t, nr, Paint::solid(Color::White), 8);
-        fillScanlines(t, nr, 5, Color::Black);
-        fastStroke(t, nr, Paint::solid(Color::Black), 2, 8);
-        const Rect tag{static_cast<int16_t>(nx + 6), static_cast<int16_t>(ny + 22),
-                       static_cast<int16_t>(nodeSize - 12), 24};
-        fastFill(t, tag, Paint::solid(Color::White), 4);
-        fastStroke(t, tag, Paint::solid(Color::Black), 1, 4);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 24), nodeSize, 20}, "LASER", kFontMicro, Color::Black,
-                 TextAlign::Center, false);
-      } else if (cell == BreachGame::Node::Switch) {
-        drawCard(t, nr, 10, 2, false, false);
-        drawIcon16(t, static_cast<int16_t>(nx + nodeSize / 2 - 8), static_cast<int16_t>(ny + 12), Icon::Sliders,
-                   Color::Black);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 36), nodeSize, 24}, "SW", kFontBody, Color::Black,
-                 TextAlign::Center, false);
-      } else if (cell == BreachGame::Node::Emp) {
-        drawCard(t, nr, 10, 2, false, false);
-        drawIcon16(t, static_cast<int16_t>(nx + nodeSize / 2 - 8), static_cast<int16_t>(ny + 12), Icon::Spark,
-                   Color::Black);
-        drawText(t, Rect{nx, static_cast<int16_t>(ny + 36), nodeSize, 24}, "EMP", kFontBody, Color::Black,
-                 TextAlign::Center, false);
-      } else {
-        // Empty circuit junction node
-        const Rect pad{static_cast<int16_t>(nx + 18), static_cast<int16_t>(ny + 18), 32, 32};
-        fastFill(t, pad, Paint::solid(Color::White), 8);
-        fastStroke(t, pad, Paint::solid(Color::Black), 2, 8);
-        fillCircle(t, static_cast<int16_t>(nx + nodeSize / 2), static_cast<int16_t>(ny + nodeSize / 2), 4,
-                   Color::Black);
-      }
-    }
-  }
-
-  // Victory / Game Over Modal Banner over the Grid
-  if (b.isLevelCleared() || b.isGameOver()) {
-    const Rect banner{34, 370, static_cast<int16_t>(w - 68), 148};
-    drawCard(t, banner, 12, 8, true, true);
-    drawText(t, Rect{50, 392, static_cast<int16_t>(w - 100), 34},
-             b.isLevelCleared() ? "SOTTO-RETE VIOLATA!" : "TRACCIAMENTO ICE 100%!", kFontTitle, Color::White,
-             TextAlign::Center, false);
-    drawText(t, Rect{50, 432, static_cast<int16_t>(w - 100), 28},
-             b.isLevelCleared() ? "+1 Cristallo d'Inchiostro per Kuro-Ink!" : "Firewall ripristinati dal sistema.",
-             kFontBody, Color::White, TextAlign::Center, false);
-    drawPill(t, 124, 470, 32, b.isLevelCleared() ? "PREMI OK: PROSSIMO NODO" : "PREMI OK: RIPROVA BREACH",
-             kFontSmall, false, 14);
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawText(t, Rect{18, 706, static_cast<int16_t>(w - 36), 24},
-             "CORE: Ruba tutti  ·  SW: Spegni Laser  ·  EMP: -35% Trace  ·  EXIT: Uscita", kFontMicro, Color::Black,
-             TextAlign::Center, false);
-    drawBottomKeyBar(t, "FRECCE", "Muovi", "OK/SCUOTI", "Onda EMP", "BACK", "Esci");
-  }
-  self.cursorOnlyRedraw_ = false;
-}
-
-// ---------------------------------------------------------------------------
-// Screen 4: IMMERSIVE READER + CYBER-EDITORIAL FOOTER HUD
+// Screen 3: READER (page + status bar)
 // ---------------------------------------------------------------------------
 void InklingApp::readerScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
-  const int16_t h = kScreenH;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
 
   clearScreen();
-  // Render the book page directly into the framebuffer.
   self.lastRenderStatus_ = self.reader_->render(self.frame_);
+  self.needsReaderBackdrop_ = false;
   if (self.resumePending_ && self.lastRenderStatus_ == freeink::book::BookStatus::Ok) {
     self.resumePending_ = false;
     self.setResumeLock(false);
   }
 
-  // Futuristic 38px Bottom HUD Bar
+  // Status bar.
   const int16_t hudY = static_cast<int16_t>(h - kStatusLineHeight);
   fastFill(t, Rect{0, hudY, w, kStatusLineHeight}, Paint::solid(Color::White));
   fastFill(t, Rect{0, hudY, w, 2}, Paint::solid(Color::Black));
-
-  // Thin full-width book progress bar right along the top of the HUD!
   const uint8_t pct = self.reader_->percent();
-  const int16_t progW = static_cast<int16_t>((w * pct) / 100);
-  if (progW > 0) {
-    fastFill(t, Rect{0, static_cast<int16_t>(hudY + 2), progW, 3}, Paint::solid(Color::Black));
-  }
-
-  // Left: Mini Pet Companion icon + active milestone toast OR chapter title
-  drawInklingSprite(t, 22, static_cast<int16_t>(hudY + 21), 1, self.pet_.stage(),
-                    self.pet_.moodState(self.currentLocalTime()), self.pet_.animFrame(), false);
+  const int16_t progW = static_cast<int16_t>((static_cast<int32_t>(w) * pct) / 100);
+  if (progW > 0) fastFill(t, Rect{0, static_cast<int16_t>(hudY + 2), progW, 3}, Paint::solid(Color::Black));
 
   if (self.lastRenderStatus_ != freeink::book::BookStatus::Ok) {
     char errLine[80];
-    snprintf(errLine, sizeof(errLine), "Errore pagina: %s",
-             freeink::book::bookStatusName(self.lastRenderStatus_));
-    drawText(t, Rect{44, static_cast<int16_t>(hudY + 7), static_cast<int16_t>(w - 56), 26}, errLine, kFontSmall,
+    snprintf(errLine, sizeof(errLine), "Errore pagina: %s", freeink::book::bookStatusName(self.lastRenderStatus_));
+    drawText(t, Rect{14, static_cast<int16_t>(hudY + 7), static_cast<int16_t>(w - 28), 26}, errLine, kFontSmall,
              Color::Black);
+    if (self.nightMode_) invertScreen();
     return;
   }
 
-  const char* banner = self.pet_.activeBanner();
-  if (banner && banner[0]) {
-    drawPill(t, 44, static_cast<int16_t>(hudY + 8), 24, banner, kFontMicro, true, 10);
-  } else {
-    char chapTitle[64];
-    self.reader_->currentChapterTitle(chapTitle, sizeof(chapTitle));
-    drawText(t, Rect{44, static_cast<int16_t>(hudY + 8), 250, 24}, chapTitle, kFontSmall, Color::Black);
-  }
-
-  // Right: Page in chapter, Book %, and Clock
-  char rightMeta[64];
+  // Right: page in chapter, book %, clock. Measured, so the title gets the rest.
+  char rightMeta[48];
   if (self.status_.clockValid) {
     snprintf(rightMeta, sizeof(rightMeta), "%u/%u · %u%% · %02u:%02u",
              static_cast<unsigned>(self.reader_->pageInChapter()),
              static_cast<unsigned>(self.reader_->pagesInChapter()), static_cast<unsigned>(pct), self.status_.hour,
              self.status_.minute);
   } else {
-    snprintf(rightMeta, sizeof(rightMeta), "Pag %u/%u  ·  %u%%",
-             static_cast<unsigned>(self.reader_->pageInChapter()),
+    snprintf(rightMeta, sizeof(rightMeta), "%u/%u · %u%%", static_cast<unsigned>(self.reader_->pageInChapter()),
              static_cast<unsigned>(self.reader_->pagesInChapter()), static_cast<unsigned>(pct));
   }
-  drawPill(t, static_cast<int16_t>(w - 196), static_cast<int16_t>(hudY + 8), 24, rightMeta, kFontMicro, false, 10);
-  if (self.nightMode_) {
-    invertScreen();
-  }
+  const int16_t metaW = static_cast<int16_t>(textWidth(t, rightMeta, kFontMicro) + 20);
+  const int16_t metaX = static_cast<int16_t>(w - 10 - metaW);
+  drawPill(t, metaX, static_cast<int16_t>(hudY + 8), 24, rightMeta, kFontMicro, false, 10);
+
+  const int16_t titleW = static_cast<int16_t>(metaX - 14 - 10);
+  char chapTitle[64];
+  self.reader_->currentChapterTitle(chapTitle, sizeof(chapTitle));
+  drawText(t, Rect{14, static_cast<int16_t>(hudY + 8), titleW, 24}, chapTitle, kFontSmall, Color::Black);
+  if (self.nightMode_) invertScreen();
 }
 
 // ---------------------------------------------------------------------------
-// Screen 5: FLOATING READER OVERLAY MODAL (over the live book page!)
+// Screen 4: READER MENU (modal over the live page)
 // ---------------------------------------------------------------------------
 void InklingApp::readerMenuScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
+  const int16_t h = screenH();
   const int sel = self.readerMenu_.selected;
   const uint8_t step = self.fontStep_ < kFontSizeCount ? self.fontStep_ : 3;
   const uint8_t fam = self.fontFamily_ < kFontFamilyCount ? self.fontFamily_ : 0;
   const uint8_t spStep = self.spacingStep_ < kSpacingPresetCount ? self.spacingStep_ : 0;
   const uint8_t alStep = self.alignStep_ < kAlignPresetCount ? self.alignStep_ : 0;
 
+  // Geometry: modal inset from the screen edges, above the key bar.
+  const Rect modal{14, 12, static_cast<int16_t>(w - 28), static_cast<int16_t>(h - kKeyBarH - 12 - 16)};
+  const Rect hdr{static_cast<int16_t>(modal.x + 12), static_cast<int16_t>(modal.y + 12),
+                 static_cast<int16_t>(modal.width - 24), 44};
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t gridX = static_cast<int16_t>(modal.x + 14);
+  const int16_t gridW = static_cast<int16_t>(modal.width - 28);
+  const int16_t gridTop = static_cast<int16_t>(hdr.bottom() + 12);
+  const int16_t gridBottom = static_cast<int16_t>(modal.bottom() - 14);
+  const int16_t gapY = 12;
+  constexpr int16_t kCardMinH = 116;
+  int rowsFit = (gridBottom - gridTop + gapY) / (kCardMinH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  const int perPage = rowsFit * cols;
+  const int16_t cardH = static_cast<int16_t>((gridBottom - gridTop - (rowsFit - 1) * gapY) / rowsFit);
+  const int16_t cardW = static_cast<int16_t>((gridW - (cols - 1) * kGap) / cols);
+
   if (self.cursorOnlyRedraw_) {
-    // Clear the header counter pill + 4 big cards inside the modal (~0.05 ms)!
-    fastFill(t, Rect{30, 106, static_cast<int16_t>(w - 60), 618}, Paint::solid(Color::White));
+    clearRect(Rect{gridX, static_cast<int16_t>(gridTop - 2), static_cast<int16_t>(gridW + 6),
+                   static_cast<int16_t>(gridBottom - gridTop + 8)});
   } else {
-    // Only re-render the underlying book page if we didn't come straight from Mode::Reader!
+    // Coming from anywhere but the page itself (TOC, settings, a rotation),
+    // the page under the modal has to be drawn again first.
     if (self.needsReaderBackdrop_ && self.reader_ && self.reader_->isOpen()) {
       clearScreen();
       self.reader_->render(self.frame_);
       if (self.nightMode_) invertScreen();
-      self.needsReaderBackdrop_ = false;
     }
-
-    // Floating Neo-Brutalist Overlay Modal Card
-    const Rect modal{18, 36, static_cast<int16_t>(w - 36), 702};
-    drawCard(t, modal, 12, 8, false, true);
-
-    // Dark Header Bar inside modal
-    const Rect hdr{32, 48, static_cast<int16_t>(w - 64), 48};
+    self.needsReaderBackdrop_ = false;
+    drawCard(t, modal, 12, 6, false, true);
     fastFill(t, hdr, Paint::solid(Color::Black), 8);
-    drawText(t, Rect{48, 56, 300, 32}, "CONTROLLO LETTURA", kFontTitle, Color::White);
+    drawText(t, Rect{static_cast<int16_t>(hdr.x + 16), static_cast<int16_t>(hdr.y + 6), 300, 32}, "CONTROLLO LETTURA",
+             kFontTitle, Color::White);
+    drawBottomKeyBar(t, "SU/GIU", "Scorri", "SX/DX", "Cambia", "BACK", "Libro");
   }
 
-  // Right badge in header: current item index + book %
-  fastFill(t, Rect{static_cast<int16_t>(w - 178), 52, 138, 38}, Paint::solid(Color::Black));
+  // Header badge: item index + book %. Redrawn on every move.
   char hdrBadge[32];
   snprintf(hdrBadge, sizeof(hdrBadge), "%d/%d · %u%%", sel + 1, static_cast<int>(kMenuCount),
            static_cast<unsigned>(self.reader_->percent()));
-  drawPill(t, static_cast<int16_t>(w - 164), 58, 28, hdrBadge, kFontSmall, false, 10);
+  const int16_t badgeW = static_cast<int16_t>(textWidth(t, hdrBadge, kFontSmall) + 20);
+  fastFill(t, Rect{static_cast<int16_t>(hdr.right() - 170), static_cast<int16_t>(hdr.y + 4), 166, 36},
+           Paint::solid(Color::Black));
+  drawPill(t, static_cast<int16_t>(hdr.right() - 10 - badgeW), static_cast<int16_t>(hdr.y + 8), 28, hdrBadge,
+           kFontSmall, false, 10);
 
-  // 4 Big, High-Legibility Cards per screen (using kFontTitle + kFontBody!)
   static const char* const kTitles[kMenuCount] = {
-      "TORNA AL LIBRO",
-      "INDICE CAPITOLI",
-      "DIMENSIONE TESTO",
-      "CARATTERE FONT",
-      "LETTURA VELOCE",
-      "SPAZIATURA PAGINA",
-      "IMPAGINAZIONE",
-      "MODALITÀ NOTTE",
-      "IMPOSTAZIONI SISTEMA",
-      "CHIUDI LIBRO",
+      "TORNA AL LIBRO", "INDICE CAPITOLI", "DIMENSIONE TESTO", "CARATTERE",    "LETTURA VELOCE",
+      "SPAZIATURA",     "IMPAGINAZIONE",   "MODALITÀ NOTTE",   "IMPOSTAZIONI", "CHIUDI LIBRO",
   };
   static const Icon kRowIcons[kMenuCount] = {
       Icon::Book,    Icon::Compass, Icon::Spark, Icon::Sliders, Icon::Flame,
-      Icon::Sliders, Icon::Check,   Icon::Moon,  Icon::Sliders, Icon::Crystal,
+      Icon::Sliders, Icon::Check,   Icon::Moon,  Icon::Sliders, Icon::Book,
+  };
+  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48];
+  snprintf(v0, sizeof(v0), "%s  ·  SX/DX ±10%%", self.layoutDirty_ ? "OK: applica" : "OK: continua");
+  snprintf(v1, sizeof(v1), "Cap. %u di %u  ·  OK: apri", static_cast<unsigned>(self.reader_->currentSpine() + 1),
+           static_cast<unsigned>(self.reader_->spineCount()));
+  snprintf(v2, sizeof(v2), "<  %u px · %s  >", kFontSizes[step], kFontSizeLabels[step]);
+  snprintf(v3, sizeof(v3), "<  %s  >", fontFamilyName(fam));
+  snprintf(v4, sizeof(v4), "<  Bionic %s  >", self.focusReading_ ? "attiva" : "spenta");
+  snprintf(v5, sizeof(v5), "<  %s  >", kSpacingPresets[spStep].label);
+  snprintf(v6, sizeof(v6), "<  %s  >", kAlignPresets[alStep].label);
+  snprintf(v7, sizeof(v7), "<  %s  >", self.nightMode_ ? "Scura" : "Chiara");
+  const char* const values[kMenuCount] = {
+      v0, v1, v2, v3, v4, v5, v6, v7, "Rotazione, sleep, Wi-Fi  ·  OK", "OK: chiudi e torna a Home",
   };
 
-  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48], v6[48], v7[48], v8[48], v9[48];
-  snprintf(v0, sizeof(v0), self.layoutDirty_ ? "OK: Applica   ·   SX/DX: -/+ 10%%"
-                                             : "OK: Continua   ·   SX/DX: -/+ 10%%");
-  snprintf(v1, sizeof(v1), "Cap. %u di %u   ·   OK: Apri indice",
-           static_cast<unsigned>(self.reader_->currentSpine() + 1),
-           static_cast<unsigned>(self.reader_->spineCount()));
-  snprintf(v2, sizeof(v2), "<   %u PX  (%s)   >", kFontSizes[step], kFontSizeLabels[step]);
-  snprintf(v3, sizeof(v3), "<   %s   >", fontFamilyName(fam));
-  snprintf(v4, sizeof(v4), "<   Bionic: %s   >", self.focusReading_ ? "ATTIVA" : "OFF");
-  snprintf(v5, sizeof(v5), "<   %s   >", kSpacingPresets[spStep].label);
-  snprintf(v6, sizeof(v6), "<   %s   >", kAlignPresets[alStep].label);
-  snprintf(v7, sizeof(v7), "<   %s   >", self.nightMode_ ? "ON (Scuro)" : "OFF (Chiaro)");
-  snprintf(v8, sizeof(v8), "Rotazione, Sleep, Wi-Fi   ·   OK: Apri");
-  snprintf(v9, sizeof(v9), "OK: Home   ·   SX/DX: Santuario Pet");
-
-  const char* const values[kMenuCount] = {v0, v1, v2, v3, v4, v5, v6, v7, v8, v9};
-
-  constexpr int kVisCards = 4;
-  int first = (sel / kVisCards) * kVisCards;
-  if (first > kMenuCount - kVisCards) first = kMenuCount - kVisCards;
-  if (first < 0) first = 0;
-
-  const int16_t startY = 114;
-  const int16_t cardH = 140;
-  const int16_t gapY = 14;
-
-  for (int slot = 0; slot < kVisCards; ++slot) {
+  const int first = pageFirst(sel, kMenuCount, perPage);
+  for (int slot = 0; slot < perPage; ++slot) {
     const int idx = first + slot;
     if (idx >= kMenuCount) break;
     const bool active = (idx == sel);
-    const int16_t cy = static_cast<int16_t>(startY + slot * (cardH + gapY));
-    const Rect cr{34, cy, static_cast<int16_t>(w - 68), cardH};
-
+    const int16_t cx = static_cast<int16_t>(gridX + (slot % cols) * (cardW + kGap));
+    const int16_t cy = static_cast<int16_t>(gridTop + (slot / cols) * (cardH + gapY));
+    const Rect cr{cx, cy, cardW, cardH};
     drawCard(t, cr, 10, active ? 5 : 2, active, active);
     const Color fg = active ? Color::White : Color::Black;
+    drawIcon16(t, static_cast<int16_t>(cx + 18), static_cast<int16_t>(cy + 20), kRowIcons[idx], fg);
+    const char* titleTxt = (idx == kMenuContinue && self.layoutDirty_) ? "APPLICA E TORNA" : kTitles[idx];
+    drawText(t, Rect{static_cast<int16_t>(cx + 44), static_cast<int16_t>(cy + 12), static_cast<int16_t>(cardW - 58), 32},
+             titleTxt, kFontTitle, fg);
 
-    // Top row of card: Icon + Big Title (kFontTitle)
-    drawIcon16(t, 54, static_cast<int16_t>(cy + 24), kRowIcons[idx], fg);
-    const char* titleTxt = (idx == kMenuContinue && self.layoutDirty_) ? "APPLICA E TORNA AL LIBRO" : kTitles[idx];
-    drawText(t, Rect{82, static_cast<int16_t>(cy + 16), static_cast<int16_t>(w - 136), 32}, titleTxt, kFontTitle, fg);
-
-    // Bottom row of card: Giant Value Box / Pill (kFontTitle or kFontBody)
-    const Rect valBox{52, static_cast<int16_t>(cy + 62), static_cast<int16_t>(w - 104), 58};
+    const Rect valBox{static_cast<int16_t>(cx + 14), static_cast<int16_t>(cy + cardH - 66),
+                      static_cast<int16_t>(cardW - 28), 52};
     fastFill(t, valBox, Paint::solid(active ? Color::White : Color::Black), 8);
-    const Color valFg = active ? Color::Black : Color::White;
-    drawText(t, Rect{64, static_cast<int16_t>(cy + 75), static_cast<int16_t>(w - 128), 32}, values[idx],
-             (idx >= kMenuFontSize && idx <= kMenuNightMode) ? kFontTitle : kFontBody, valFg, TextAlign::Center);
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "SU/GIU", "Scorri", "SX/DX/OK", "Cambia", "BACK", "Libro");
+    const bool isSetting = idx >= kMenuFontSize && idx <= kMenuNightMode;
+    const FontSlot vf =
+        fitFont(t, values[idx], static_cast<int16_t>(valBox.width - 16), isSetting ? kFontTitle : kFontBody);
+    drawText(t, valBox, values[idx], vf, active ? Color::Black : Color::White, TextAlign::Center, false);
   }
   self.cursorOnlyRedraw_ = false;
 }
 
 // ---------------------------------------------------------------------------
-// Screen 6: HIERARCHICAL TABLE OF CONTENTS (TOC)
+// Screen 5: TABLE OF CONTENTS
 // ---------------------------------------------------------------------------
 void InklingApp::tocScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
   const int count = self.tocMenu_.count;
   const int sel = self.tocMenu_.selected;
   const int currentChap = self.reader_->currentTocIndex();
 
+  const Rect hdrCard{kMargin, static_cast<int16_t>(contentTop() + 2), static_cast<int16_t>(w - 2 * kMargin), 64};
+  const int16_t listTop = static_cast<int16_t>(hdrCard.bottom() + 12);
+  const int16_t listBottom = contentBottom();
+  const int16_t rowH = 58;
+  const int16_t gapY = 8;
+  int perPage = (listBottom - listTop + gapY) / (rowH + gapY);
+  if (perPage < 1) perPage = 1;
+
   if (self.cursorOnlyRedraw_) {
-    clearBandY(44, 750);
+    clearRect(Rect{0, static_cast<int16_t>(contentTop()), w, static_cast<int16_t>(listBottom - contentTop() + 4)});
   } else {
     clearScreen();
-    drawTopHud(t, self.status_, self.pet_, "INDICE");
+    drawTopHud(t, self.status_, "INDICE");
+    drawBottomKeyBar(t, "SU/GIU", "Capitolo", "OK", "Vai", "BACK", "Menu");
   }
 
-  // Book header banner
-  const Rect hdrCard{16, 48, static_cast<int16_t>(w - 32), 68};
   drawCard(t, hdrCard, 8, 3, false, false);
-  drawText(t, Rect{30, 54, static_cast<int16_t>(w - 160), 28}, self.reader_->title(), kFontTitle, Color::Black);
   char countBadge[32];
-  snprintf(countBadge, sizeof(countBadge), "%d / %d CAP.", sel + 1, count);
-  drawPill(t, static_cast<int16_t>(w - 134), 60, 24, countBadge, kFontMicro, true, 10);
-  drawText(t, Rect{30, 84, static_cast<int16_t>(w - 60), 22}, self.reader_->author(), kFontSmall, Color::Black);
+  snprintf(countBadge, sizeof(countBadge), "%d / %d", sel + 1, count);
+  const int16_t badgeW = static_cast<int16_t>(textWidth(t, countBadge, kFontMicro) + 20);
+  drawPill(t, static_cast<int16_t>(hdrCard.right() - 12 - badgeW), static_cast<int16_t>(hdrCard.y + 10), 24,
+           countBadge, kFontMicro, true, 10);
+  drawText(t, Rect{static_cast<int16_t>(hdrCard.x + 14), static_cast<int16_t>(hdrCard.y + 6),
+                   static_cast<int16_t>(hdrCard.width - badgeW - 40), 28},
+           self.reader_->title(), kFontTitle, Color::Black);
+  drawText(t, Rect{static_cast<int16_t>(hdrCard.x + 14), static_cast<int16_t>(hdrCard.y + 36),
+                   static_cast<int16_t>(hdrCard.width - 28), 22},
+           self.reader_->author(), kFontSmall, Color::Black);
 
-  // Window of 8 chapter cards
-  constexpr int kVisRows = 8;
-  int first = (sel / kVisRows) * kVisRows;
-  if (first > count - kVisRows) first = count - kVisRows;
-  if (first < 0) first = 0;
-
-  const int16_t startY = 128;
-  const int16_t rowH = 66;
-  const int16_t gapY = 8;
-
-  for (int slot = 0; slot < kVisRows; ++slot) {
+  const int first = pageFirst(sel, count, perPage);
+  for (int slot = 0; slot < perPage; ++slot) {
     const int idx = first + slot;
     if (idx >= count) break;
     const bool active = (idx == sel);
     const bool isCurrent = (idx == currentChap);
-
     char rawTitle[64] = {};
     uint8_t depth = 0;
     self.reader_->tocEntry(static_cast<size_t>(idx), rawTitle, sizeof(rawTitle), &depth);
 
-    const int16_t ry = static_cast<int16_t>(startY + slot * (rowH + gapY));
-    const Rect rr{16, ry, static_cast<int16_t>(w - 32), rowH};
+    const int16_t ry = static_cast<int16_t>(listTop + slot * (rowH + gapY));
+    const Rect rr{kMargin, ry, static_cast<int16_t>(w - 2 * kMargin), rowH};
     drawCard(t, rr, 8, active ? 4 : 2, active, false);
-
     const Color fg = active ? Color::White : Color::Black;
     char numBadge[16];
     snprintf(numBadge, sizeof(numBadge), "%02d", idx + 1);
-    drawPill(t, 28, static_cast<int16_t>(ry + 20), 26, numBadge, kFontMicro, !active, 8);
-
-    const int16_t indent = static_cast<int16_t>(depth > 0 ? 18 : 0);
-    const int16_t tx = static_cast<int16_t>(76 + indent);
-    const int16_t tw = static_cast<int16_t>(w - tx - (isCurrent ? 104 : 30));
-    drawText(t, Rect{tx, static_cast<int16_t>(ry + 18), tw, 30},
+    drawPill(t, static_cast<int16_t>(rr.x + 12), static_cast<int16_t>(ry + (rowH - 26) / 2), 26, numBadge, kFontMicro,
+             !active, 8);
+    const int16_t indent = static_cast<int16_t>(depth > 3 ? 3 * 16 : depth * 16);
+    const int16_t tx = static_cast<int16_t>(rr.x + 64 + indent);
+    const int16_t curW = isCurrent ? 104 : 0;
+    const int16_t tw = static_cast<int16_t>(rr.right() - tx - 14 - curW);
+    drawText(t, Rect{tx, static_cast<int16_t>(ry + (rowH - 30) / 2), tw, 30},
              rawTitle[0] ? rawTitle : "(Capitolo senza titolo)", kFontBody, fg);
-
     if (isCurrent) {
-      drawPill(t, static_cast<int16_t>(w - 106), static_cast<int16_t>(ry + 21), 24, " IN CORSO", kFontMicro, !active,
-               8);
+      drawPill(t, static_cast<int16_t>(rr.right() - 12 - 90), static_cast<int16_t>(ry + (rowH - 24) / 2), 24,
+               "QUI", kFontMicro, !active, 10);
     }
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "SU/GIU", "Capitolo", "OK", "Vai a capitolo", "BACK", "Menu");
   }
   self.cursorOnlyRedraw_ = false;
 }
 
+// ---------------------------------------------------------------------------
+// Screen 6: SETTINGS
+// ---------------------------------------------------------------------------
 void InklingApp::settingsScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  const int16_t w = kScreenW;
+  const int16_t w = screenW();
   const int sel = self.settingsMenu_.selected;
 
+  const int cols = isLandscape() ? 2 : 1;
+  const int16_t listTop = static_cast<int16_t>(contentTop() + 26);
+  const int16_t listBottom = contentBottom();
+  const int16_t gapY = 8;
+  constexpr int16_t kCardMinH = 116;
+  int rowsFit = (listBottom - listTop + gapY) / (kCardMinH + gapY);
+  if (rowsFit < 1) rowsFit = 1;
+  const int perPage = rowsFit * cols;
+  const int16_t cardH = static_cast<int16_t>((listBottom - listTop - (rowsFit - 1) * gapY) / rowsFit);
+  const int16_t cardW = static_cast<int16_t>((w - 2 * kMargin - (cols - 1) * kGap) / cols);
+
   if (self.cursorOnlyRedraw_) {
-    clearBandY(42, 746);
+    clearRect(Rect{0, static_cast<int16_t>(contentTop()), w, static_cast<int16_t>(listBottom - contentTop() + 4)});
   } else {
     clearScreen();
-    drawTopHud(t, self.status_, self.pet_, "IMPOSTAZIONI");
+    drawTopHud(t, self.status_, "IMPOSTAZIONI");
+    drawBottomKeyBar(t, "SX/DX", "Cambia", "OK", "Apri", "BACK", "Salva ed esci");
   }
 
-  // Subheader
-  char countTxt[64];
-  snprintf(countTxt, sizeof(countTxt), "STUDIO HARDWARE & SISTEMA  ·  VOCE %d/%d", sel + 1, static_cast<int>(kSetCount));
-  drawText(t, Rect{18, 46, static_cast<int16_t>(w - 36), 22}, countTxt, kFontMicro, Color::Black);
-
-  // 5 Big Rich Cards per page
-  constexpr int kVisCards = 5;
-  int first = (sel / kVisCards) * kVisCards;
-  if (first > kSetCount - kVisCards) first = kSetCount - kVisCards;
-  if (first < 0) first = 0;
+  char countTxt[32];
+  snprintf(countTxt, sizeof(countTxt), "VOCE %d/%d", sel + 1, static_cast<int>(kSetCount));
+  drawText(t, Rect{18, static_cast<int16_t>(contentTop() + 2), 200, 22}, countTxt, kFontMicro, Color::Black);
+  drawPageDots(t, static_cast<int16_t>(w - 18), static_cast<int16_t>(contentTop() + 8), sel, kSetCount, perPage);
 
   static const char* const kTitles[kSetCount] = {
-      "ROTAZIONE DISPLAY",
-      "INVERSIONE TASTI 180°",
-      "TIMER AUTO-SLEEP",
-      "SENSIBILITÀ POWER",
-      "ANTI-GHOSTING REFRESH",
-      "WIDGET DESK STAND",
-      "TEMA & CONTRASTO",
-      "WI-FI & CYBER-NET",
-      "RADAR DIAGNOSTICA",
+      "ROTAZIONE SCHERMO", "TASTI E ROTAZIONE", "SPEGNIMENTO AUTOMATICO", "PULIZIA SCHERMO",
+      "WIDGET OROLOGIO",   "TEMA",              "WI-FI E AGGIORNAMENTI",  "DIAGNOSTICA",
   };
-
   static const char* const kSubtitles[kSetCount] = {
-      "Sensore accelerometro QMI8658 / Blocco fisso",
-      "Inverte Up/Down & Left/Right a 180° per uso naturale",
-      "Spegnimento automatico se non toccato per risparmio",
-      "Filtro anti-rimbalzo per risveglio intenzionale",
-      "Frequenza pulizia totale della matrice E-Ink",
-      "Widget visualizzato nella dock split-flap da tavolo",
-      "Inversione colori giorno/notte ad alto contrasto",
-      "Connessione reti multiple, meteo e download OTA",
-      "Radar IMU 3 assi tempo reale, RTC DS3231 e memoria",
+      "Automatica col sensore o bloccata su un lato",
+      "Le frecce indicano la direzione sullo schermo",
+      "Dopo quanto tempo senza tasti va a riposo",
+      "Ogni quante pagine un refresh completo",
+      "Riquadro in basso nella schermata Orologio",
+      "Carta chiara o testo bianco su nero",
+      "Portale web, giornale Daily Ink, firmware",
+      "Sensori, batteria, memoria e slot OTA",
   };
-
   static const Icon kIcons[kSetCount] = {
-      Icon::Compass,
-      Icon::Sliders,
-      Icon::Moon,
-      Icon::Spark,
-      Icon::Spark,
-      Icon::Compass,
-      Icon::Sliders,
-      Icon::Wifi,
-      Icon::Sliders,
+      Icon::Compass, Icon::Sliders, Icon::Moon, Icon::Spark, Icon::Compass, Icon::Sliders, Icon::Wifi, Icon::Sliders,
   };
-
-  char v0[64], v1[64], v2[64], v3[64], v4[64], v5[64], v6[64], v7[64], v8[64];
+  char v0[48], v1[48], v2[48], v3[48], v4[48], v5[48];
   snprintf(v0, sizeof(v0), "<  %s  >", self.settings_.rotationModeLabel());
   snprintf(v1, sizeof(v1), "<  %s  >", self.settings_.invertKeysLabel());
   snprintf(v2, sizeof(v2), "<  %s  >", self.settings_.autoSleepLabel());
-  snprintf(v3, sizeof(v3), "<  %s  >", self.settings_.wakeSensitivityLabel());
-  snprintf(v4, sizeof(v4), "<  %s  >", self.settings_.refreshCadenceLabel());
-  snprintf(v5, sizeof(v5), "<  %s  >", self.settings_.deskWidgetLabel());
-  snprintf(v6, sizeof(v6), "<  %s  >", self.settings_.nightModeLabel());
-  snprintf(v7, sizeof(v7), "[ PREMI OK PER AVVIARE HUB ]");
-  snprintf(v8, sizeof(v8), "[ PREMI OK PER APRIRE RADAR ]");
-  const char* const values[kSetCount] = {v0, v1, v2, v3, v4, v5, v6, v7, v8};
+  snprintf(v3, sizeof(v3), "<  %s  >", self.settings_.refreshCadenceLabel());
+  snprintf(v4, sizeof(v4), "<  %s  >", self.settings_.deskWidgetLabel());
+  snprintf(v5, sizeof(v5), "<  %s  >", self.settings_.nightModeLabel());
+  const char* const values[kSetCount] = {v0, v1, v2, v3, v4, v5, "OK: avvia il Wi-Fi", "OK: apri"};
 
-  const int16_t startY = 72;
-  const int16_t cardH = 124;
-  const int16_t gapY = 8;
-
-  for (int slot = 0; slot < kVisCards; ++slot) {
+  const int first = pageFirst(sel, kSetCount, perPage);
+  for (int slot = 0; slot < perPage; ++slot) {
     const int idx = first + slot;
     if (idx >= kSetCount) break;
-    const int16_t cy = static_cast<int16_t>(startY + slot * (cardH + gapY));
     const bool isSel = (idx == sel);
-    const Rect cr{14, cy, static_cast<int16_t>(w - 28), cardH};
+    const int16_t cx = static_cast<int16_t>(kMargin + (slot % cols) * (cardW + kGap));
+    const int16_t cy = static_cast<int16_t>(listTop + (slot / cols) * (cardH + gapY));
+    const Rect cr{cx, cy, cardW, cardH};
+    drawCard(t, cr, 8, isSel ? 4 : 2, false, isSel);
+    if (isSel) fastFill(t, Rect{cx, cy, 8, cardH}, Paint::solid(Color::Black), 4);
 
-    drawCard(t, cr, 8, isSel ? 3 : 2, false, false);
-    if (isSel) {
-      drawPill(t, static_cast<int16_t>(w - 130), static_cast<int16_t>(cy + 10), 22, "ATTIVO", kFontMicro, false, 8);
-    }
-
-    drawIcon16(t, static_cast<int16_t>(cr.x + 14), static_cast<int16_t>(cy + 14), kIcons[idx], Color::Black);
-    drawText(t, Rect{static_cast<int16_t>(cr.x + 38), static_cast<int16_t>(cy + 12), static_cast<int16_t>(cr.width - 170), 24},
+    drawIcon16(t, static_cast<int16_t>(cx + 18), static_cast<int16_t>(cy + 16), kIcons[idx], Color::Black);
+    drawText(t, Rect{static_cast<int16_t>(cx + 42), static_cast<int16_t>(cy + 10), static_cast<int16_t>(cardW - 56), 26},
              kTitles[idx], kFontBody, Color::Black);
-    drawText(t, Rect{static_cast<int16_t>(cr.x + 14), static_cast<int16_t>(cy + 40), static_cast<int16_t>(cr.width - 28), 20},
+    drawText(t, Rect{static_cast<int16_t>(cx + 18), static_cast<int16_t>(cy + 40), static_cast<int16_t>(cardW - 32), 20},
              kSubtitles[idx], kFontMicro, Color::Black);
 
-    // Value selector bar at the bottom of the card
-    const Rect valR{static_cast<int16_t>(cr.x + 10), static_cast<int16_t>(cy + 66), static_cast<int16_t>(cr.width - 20), 46};
+    const Rect valR{static_cast<int16_t>(cx + 14), static_cast<int16_t>(cy + cardH - 56),
+                    static_cast<int16_t>(cardW - 28), 44};
     fastFill(t, valR, Paint::solid(isSel ? Color::Black : Color::White), 6);
     fastStroke(t, valR, Paint::solid(Color::Black), isSel ? 3 : 1, 6);
-    drawText(t, Rect{static_cast<int16_t>(valR.x + 6), static_cast<int16_t>(valR.y + 10), static_cast<int16_t>(valR.width - 12), 26},
-             values[idx], kFontTitle, isSel ? Color::White : Color::Black, TextAlign::Center, false);
-  }
-
-  if (!self.cursorOnlyRedraw_) {
-    drawBottomKeyBar(t, "FRECCE", "Regola", "OK", "Conferma", "BACK", "Salva & Esci");
+    const FontSlot vf = fitFont(t, values[idx], static_cast<int16_t>(valR.width - 16), kFontTitle);
+    drawText(t, valR, values[idx], vf, isSel ? Color::White : Color::Black, TextAlign::Center, false);
   }
   self.cursorOnlyRedraw_ = false;
 }
@@ -1877,8 +1657,23 @@ void InklingApp::settingsScreen(UiApp::ScreenType& screen, void* user) {
 void InklingApp::deskAmbientScreen(UiApp::ScreenType& screen, void* user) {
   auto& self = *static_cast<InklingApp*>(user);
   auto& t = screen.target();
-  self.desk_.render(t, self.status_, 7, self.pet_.state().dailyPages, self.pet_.state().dailyGoal,
-                    self.pet_.state().totalPagesRead);
+  DeskInfo info;
+  info.streakDays = self.streakDays_;
+  info.todayPages = self.dailyPages_;
+  info.goalPages = kDailyPageGoal;
+  info.totalPages = self.totalPagesRead_;
+  uint8_t coverBits[kCoverBytes];
+  const int idx = self.activeBookIndex();
+  if (idx >= 0 && idx < self.library_.count()) {
+    const auto& b = self.library_.at(idx);
+    info.bookTitle = b.name;
+    info.bookAuthor = b.author;
+    info.bookPct = b.progressPct;
+    if (self.loadBookThumb(b.path, coverBits)) {
+      info.bookCoverBits = coverBits;
+    }
+  }
+  self.desk_.render(t, self.status_, info);
 }
 
 void InklingApp::oracleScreen(UiApp::ScreenType& screen, void* user) {

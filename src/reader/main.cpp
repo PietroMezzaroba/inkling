@@ -25,6 +25,7 @@
 #include "FirmwareSlots.h"
 #include "SdStorage.h"
 #include "inkling/App.h"
+#include "inkling/Orientation.h"
 #include "inkling/Screens.h"
 #include "inkling/UiGlyphFallback.h"
 #include "inkling/ui/InklingFonts.h"
@@ -56,27 +57,28 @@ extern const uint8_t kUpdaterBinEnd[] asm("_binary_assets_updater_bin_end");
 
 namespace freeink {
 
-// Custom ultra-responsive turbo LUT bank for UC8253 (13 frames instead of 19,
-// cutting physical e-ink differential refresh time by ~32% while preserving
-// crisp black/white contrast).
+// Calibrated overdrive differential LUT bank for UC8253:
+// Uses the OEM mode-2 two-stage overdrive (0xAA -> 0xA0 for BW, 0x55 -> 0x50 for WB,
+// 0x04 micro-settle for BB) with 5-frame primary pulses + 4-frame overdrive settle,
+// eliminating gray ghosting ("aloni") while keeping page turns snappy (~290 ms).
 inline const uint8_t lut_x3_vcom_turbo[] PROGMEM = {
-    0x00, 0x03, 0x01, 0x03, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x05, 0x01, 0x05, 0x05, 0x01, 0x00, 0x04, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 inline const uint8_t lut_x3_ww_turbo[] PROGMEM = {
-    0x20, 0x03, 0x01, 0x03, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x20, 0x05, 0x01, 0x05, 0x05, 0x01, 0x00, 0x04, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 inline const uint8_t lut_x3_bw_turbo[] PROGMEM = {
-    0xAA, 0x03, 0x01, 0x03, 0x03, 0x01, 0x80, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0xAA, 0x05, 0x01, 0x05, 0x05, 0x01, 0xA0, 0x04, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 inline const uint8_t lut_x3_wb_turbo[] PROGMEM = {
-    0x55, 0x03, 0x01, 0x03, 0x03, 0x01, 0x40, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x55, 0x05, 0x01, 0x05, 0x05, 0x01, 0x50, 0x04, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 inline const uint8_t lut_x3_bb_turbo[] PROGMEM = {
-    0x10, 0x03, 0x01, 0x03, 0x03, 0x01, 0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x05, 0x01, 0x05, 0x05, 0x01, 0x04, 0x04, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
@@ -100,8 +102,6 @@ namespace {
 
 // Holding Power this long turns the device off.
 constexpr unsigned long kPowerOffHoldMs = 1000;
-// Inactivity timeout: automatically sleep if untouched for 5 minutes.
-constexpr unsigned long kAutoSleepTimeoutMs = 5UL * 60UL * 1000UL;
 // Holding Back this long on the diagnostic screen restarts into the other slot.
 constexpr unsigned long kOtherSlotHoldMs = 3000;
 // How long Back is sampled at boot for the "hold Back while powering on" escape.
@@ -132,27 +132,25 @@ freeink::ui::Orientation currentOrientation = freeink::ui::Orientation::Portrait
 
 void renderNow();
 
+// The app's orientation handler: rotates the UI target, then lets the app
+// follow (page rotation, relayout, full repaint). Only InklingApp calls it, via
+// setDesiredOrientation()/applyOrientation(), so the two never disagree.
 void setAppOrientation(freeink::ui::Orientation orient) {
   if (currentOrientation == orient) return;
-  LOG("switching orientation: %d -> %d", static_cast<int>(currentOrientation), static_cast<int>(orient));
+  LOG("orientation %s -> %s", inkling::orientationName(currentOrientation), inkling::orientationName(orient));
   currentOrientation = orient;
   inkling::ui::canvas::setCanvasOrientation(orient);
   if (gDisplayTarget) {
     gDisplayTarget->setOrientation(orient);
     if (ui) ui->setDevice(gDisplayTarget->deviceContext());
   }
-  if (gFrameTarget) {
-    gFrameTarget->rotation = (orient == freeink::ui::Orientation::Portrait ? freeink::book::FrameRotation::Portrait
-                                                                          : freeink::book::FrameRotation::PortraitInverted);
-  }
-  if (app) {
-    app->onOrientationChanged(orient);
-  }
+  if (gFrameTarget) gFrameTarget->rotation = inkling::frameRotationFor(orient);
+  if (app) app->onOrientationChanged(orient);
 }
 
-void onOrientationRequest(freeink::ui::Orientation orient, void*) {
-  setAppOrientation(orient);
-}
+void onOrientationRequest(freeink::ui::Orientation orient, void*) { setAppOrientation(orient); }
+
+inkling::OrientationTracker orientationTracker;
 
 // The press that powered the device on is still held at boot; Power only arms
 // the power-off gesture after it has been released once.
@@ -217,9 +215,13 @@ bool pollStatus() {
 
 void presentFrame(freeink::ui::RefreshHint hint, void*) {
   if (hint == freeink::ui::RefreshHint::Fast) {
-    // Non-blocking start: fires the waveform and lets the main loop keep
-    // sampling buttons at 500 Hz while the e-ink panel refreshes.
+    // Non-blocking start: fires the differential overdrive waveform and lets
+    // the main loop keep sampling buttons at 500 Hz while the panel refreshes.
     display->triggerDisplay(EInkDisplay::FAST_REFRESH);
+  } else if (hint == freeink::ui::RefreshHint::Clean) {
+    // Non-blocking single-pass scrub (WW==BW, WB==BB): drives every pixel
+    // unconditionally to clean white/black in ~350 ms without double-flashing.
+    display->triggerDisplay(EInkDisplay::HALF_REFRESH);
   } else {
     display->displayBuffer(EInkDisplay::FULL_REFRESH);
   }
@@ -233,13 +235,9 @@ void renderNow() {
 }
 
 RTC_DATA_ATTR bool rtcDeviceWasSleeping = false;
-RTC_DATA_ATTR uint16_t rtcWakeHoldThresholdMs = 350;
 
 [[noreturn]] void powerOff() {
   LOG("power off");
-  if (app) {
-    rtcWakeHoldThresholdMs = static_cast<uint16_t>(app->settings().wakeHoldMs());
-  }
   display->completeDisplay();
   app->shutdown();  // reading position is already saved per page; this closes files
   ui->setScreen(inkling::sleepScreen, app, freeink::ui::RefreshHint::Full);
@@ -306,29 +304,23 @@ bool dequeueButton(inkling::Button& out) {
 }
 
 void latchButtons() {
-  const bool invertKeys = (currentOrientation == freeink::ui::Orientation::PortraitInverted) &&
-                          app && app->settings().invertKeysOn180;
   struct ButtonMap {
     uint8_t hw;
     inkling::Button button;
   };
-  static constexpr ButtonMap kMapNormal[] = {
-      {InputManager::BTN_BACK, inkling::Button::Back},   {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
-      {InputManager::BTN_LEFT, inkling::Button::Left},   {InputManager::BTN_RIGHT, inkling::Button::Right},
-      {InputManager::BTN_UP, inkling::Button::Up},       {InputManager::BTN_DOWN, inkling::Button::Down},
+  static constexpr ButtonMap kMap[] = {
+      {InputManager::BTN_BACK, inkling::Button::Back}, {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
+      {InputManager::BTN_LEFT, inkling::Button::Left}, {InputManager::BTN_RIGHT, inkling::Button::Right},
+      {InputManager::BTN_UP, inkling::Button::Up},     {InputManager::BTN_DOWN, inkling::Button::Down},
   };
-  static constexpr ButtonMap kMapInverted[] = {
-      {InputManager::BTN_BACK, inkling::Button::Back},   {InputManager::BTN_CONFIRM, inkling::Button::Confirm},
-      {InputManager::BTN_LEFT, inkling::Button::Right},  {InputManager::BTN_RIGHT, inkling::Button::Left},
-      {InputManager::BTN_UP, inkling::Button::Down},     {InputManager::BTN_DOWN, inkling::Button::Up},
-  };
-  const ButtonMap* map = invertKeys ? kMapInverted : kMapNormal;
-  for (size_t i = 0; i < 6; ++i) {
-    if (!input.wasPressed(map[i].hw)) continue;
+  // Keys follow the screen in every orientation unless the user turned it off.
+  const bool spatial = app && app->settings().invertKeysOn180;
+  for (const auto& m : kMap) {
+    if (!input.wasPressed(m.hw)) continue;
     ensureCpuTurbo();
-    status.lastButton = InputManager::getButtonName(map[i].hw);
+    status.lastButton = InputManager::getButtonName(m.hw);
     status.buttonPresses++;
-    enqueueButton(map[i].button);
+    enqueueButton(spatial ? inkling::spatialButton(m.button, currentOrientation) : m.button);
   }
 
   // Back held 3 s on the diagnostic screen: restart into the other slot. Only
@@ -495,6 +487,21 @@ void setup() {
 
     static inkling::BookReader bookReader(storage, *readerMemory);
     reader = &bookReader;
+    // Chapter page index: its own block, taken after the glyph caches so it
+    // never shrinks them; the ideal size when the rasterizer reserve survives.
+    using Index = inkling::IndexSizes;
+    size_t indexLen = fits(Index::kIdeal) ? Index::kIdeal : Index::kMin;
+    uint8_t* indexBuf = static_cast<uint8_t*>(malloc(indexLen));
+    if (!indexBuf && indexLen != Index::kMin) {
+      indexLen = Index::kMin;
+      indexBuf = static_cast<uint8_t*>(malloc(indexLen));
+    }
+    if (indexBuf) {
+      reader->setIndexBuffer(indexBuf, indexLen);
+    } else {
+      indexLen = 0;
+      status.notice = "Memoria insufficiente per l'indice";
+    }
     // Parsing borrows the framebuffer while a chapter is laid out.
     reader->setParseBuffer(display->getFrameBuffer(),
                            static_cast<size_t>(display->getDisplayWidthBytes()) * display->getDisplayHeight());
@@ -516,8 +523,9 @@ void setup() {
       uiFallback.setFont(&reader->regularFont());
       displayTarget.setGlyphFallback(&uiFallback);
     }
-    LOG("glyph caches: regular %u, italic %u, max block left %u", static_cast<unsigned>(regularCache ? regularLen : 0),
-        static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+    LOG("glyph caches: regular %u, italic %u, index %u, max block left %u",
+        static_cast<unsigned>(regularCache ? regularLen : 0), static_cast<unsigned>(italicCache ? Glyphs::kItalic : 0),
+        static_cast<unsigned>(indexLen), static_cast<unsigned>(ESP.getMaxAllocHeap()));
   } else {
     status.notice = "Memoria insufficiente per il lettore";
   }
@@ -551,13 +559,13 @@ void setup() {
     app->begin();  // library
   }
 
-  if (app->settings().rotationMode == inkling::RotationMode::LockPortrait) {
-    setAppOrientation(freeink::ui::Orientation::Portrait);
-  } else if (app->settings().rotationMode == inkling::RotationMode::LockInverted) {
-    setAppOrientation(freeink::ui::Orientation::PortraitInverted);
-  } else if (app->settings().rotationMode == inkling::RotationMode::Auto) {
-    if (status.imuReady && status.ay > 0.42f && std::fabs(status.az) <= 0.75f) {
-      setAppOrientation(freeink::ui::Orientation::PortraitInverted);
+  // Rotation locks were applied by begin(); automatic modes start from how
+  // the device is held right now.
+  if (app->settings().autoRotation() && status.imuReady) {
+    freeink::ui::Orientation initial;
+    if (inkling::OrientationTracker::classify(status.ax, status.ay, status.az, app->settings().autoAllowsLandscape(),
+                                              initial)) {
+      app->setDesiredOrientation(initial);
     }
   }
   app->update();
@@ -614,44 +622,17 @@ void loop() {
       status.ax = sample.ax;
       status.ay = sample.ay;
       status.az = sample.az;
+      app->onImuSample(sample.ax, sample.ay, sample.az);
 
-      // Dynamic Auto-Rotation via Accelerometer (0° <-> 180°)
-      if (app && app->settings().rotationMode == inkling::RotationMode::Auto) {
-        static freeink::ui::Orientation candidate = freeink::ui::Orientation::Portrait;
-        static uint8_t holdCount = 0;
-
-        // If resting flat on desk / table (|az| > 0.75g), hold previous orientation (anti-jitter)
-        if (std::fabs(sample.az) <= 0.75f) {
-          freeink::ui::Orientation detected = currentOrientation;
-          if (sample.ay < -0.45f) {
-            detected = freeink::ui::Orientation::Portrait;
-          } else if (sample.ay > 0.45f) {
-            detected = freeink::ui::Orientation::PortraitInverted;
-          }
-
-          if (detected != currentOrientation) {
-            if (detected == candidate) {
-              if (++holdCount >= 4) {  // Held steadily for ~800ms
-                setAppOrientation(detected);
-                holdCount = 0;
-              }
-            } else {
-              candidate = detected;
-              holdCount = 1;
-            }
-          } else {
-            holdCount = 0;
-          }
-        } else {
-          holdCount = 0;
+      // Auto-rotation (Settings: "Auto verticale" / "Auto 4 lati").
+      if (app->settings().autoRotation()) {
+        freeink::ui::Orientation next;
+        if (orientationTracker.update(sample.ax, sample.ay, sample.az, app->settings().autoAllowsLandscape(),
+                                      app->desiredOrientation(), next)) {
+          app->setDesiredOrientation(next);
         }
-      }
-
-      if (app->mode() == inkling::InklingApp::Mode::Home ||
-          app->mode() == inkling::InklingApp::Mode::PetSanctuary ||
-          app->mode() == inkling::InklingApp::Mode::BreachGame ||
-          app->mode() == inkling::InklingApp::Mode::Oracle) {
-        app->onImuSample(sample.ax, sample.ay, sample.az);
+      } else {
+        orientationTracker.reset();
       }
     }
   }
@@ -664,7 +645,7 @@ void loop() {
   app->update();
 
   // Inactivity auto-sleep (configurable in Settings):
-  const unsigned long autoSleepTimeoutMs = app ? app->settings().autoSleepTimeoutMs() : (5UL * 60UL * 1000UL);
+  const unsigned long autoSleepTimeoutMs = app->settings().autoSleepTimeoutMs();
   const bool isDeskClockOnUsb = (app->mode() == inkling::InklingApp::Mode::DeskAmbient) && status.charging;
   if (!isDeskClockOnUsb && autoSleepTimeoutMs != 0xFFFFFFFFUL && (millis() - lastActivityMs >= autoSleepTimeoutMs)) {
     LOG("inactivity timeout (%lu ms): entering auto-sleep", autoSleepTimeoutMs);

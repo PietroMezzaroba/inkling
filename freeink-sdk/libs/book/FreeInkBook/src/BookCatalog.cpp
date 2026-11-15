@@ -1377,6 +1377,62 @@ bool BookCatalog::coverEntry(ZipEntry* out) const {
   return true;
 }
 
+namespace {
+
+class FirstImageScanner : public XmlHandler {
+ public:
+  void onStartElement(const char* name, const char** atts) override {
+    if (found[0] != '\0') return;
+    const char* src = nullptr;
+    if (localIs(name, "img")) {
+      src = attrLocal(atts, "src");
+    } else if (localIs(name, "image")) {
+      src = attrLocal(atts, "href");
+    }
+    if (src != nullptr && src[0] != '\0') {
+      strncpy(found, src, sizeof(found) - 1);
+      found[sizeof(found) - 1] = '\0';
+    }
+  }
+  char found[kMaxPath] = "";
+};
+
+}  // namespace
+
+bool BookCatalog::findCoverOrFirstImage(BookSource& source, Arena& scratch, ZipEntry* out) const {
+  if (coverEntry(out)) return true;
+  if (!isOpen() || spineCount_ == 0) return false;
+
+  ZipEntry spine0;
+  if (spineEntry(0, &spine0) != BookStatus::Ok) return false;
+
+  const size_t marked = scratch.mark();
+  char* hrefBuf = static_cast<char*>(scratch.alloc(kMaxPath, 1));
+  char* docDir = static_cast<char*>(scratch.alloc(kMaxPath, 1));
+  void* scanMem = scratch.alloc(sizeof(FirstImageScanner), alignof(FirstImageScanner));
+  if (hrefBuf == nullptr || docDir == nullptr || scanMem == nullptr ||
+      spineHref(0, hrefBuf, kMaxPath) != BookStatus::Ok || !dirName(hrefBuf, docDir, kMaxPath)) {
+    scratch.release(marked);
+    return false;
+  }
+
+  FirstImageScanner* scanner = new (scanMem) FirstImageScanner;
+  const BookStatus st = XmlSax::parseEntry(source, spine0, scratch, *scanner);
+  bool ok = false;
+  if (st == BookStatus::Ok && scanner->found[0] != '\0') {
+    const char* resolved = resolveHref(scratch, docDir, scanner->found, nullptr);
+    if (resolved != nullptr) {
+      const ZipEntry* imgEntry = zip().find(resolved);
+      if (imgEntry != nullptr) {
+        *out = *imgEntry;
+        ok = true;
+      }
+    }
+  }
+  scratch.release(marked);
+  return ok;
+}
+
 int BookCatalog::hashRowFor(const uint32_t nameHash) const {
   int lo = 0;
   int hi = static_cast<int>(entryCount_) - 1;
