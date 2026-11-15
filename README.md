@@ -10,6 +10,40 @@
 
 ---
 
+## Novità del 15 novembre 2026
+
+Nel libro, dal menu di lettura (OK sulla pagina):
+
+- **Segnalibro** — OK segna (o toglie) la pagina, SX/DX apre l'elenco di segnalibri e ritagli: OK salta, DX elimina.
+- **Ritaglia testo** — un cursore si muove sulle parole: OK sulla prima, OK sull'ultima. Il passaggio finisce in
+  `/Ritagli/<libro>.md` sulla scheda (citazione, capitolo, percentuale, data) e resta sottolineato sulla pagina, anche
+  se poi cambi carattere o dimensione. `scripts/ritagli.sh` li copia sul Mac quando il dispositivo è in Wi-Fi.
+- **Dizionario** — OK su una parola ne cerca la voce in un dizionario StarDict messo in `/dizionari` (file `.ifo`,
+  `.idx`, `.dict` non compressi). Gestisce maiuscole, punteggiatura, elisioni; per le forme flesse propone la voce più
+  vicina.
+- **Note e link** — un cursore sui link della pagina: OK segue la nota o il rimando, BACK riporta al punto di partenza.
+
+In Home:
+
+- **Flashcard** — ripetizione spaziata (SuperMemo-2) da mazzi di testo: una carta per riga, `domanda,risposta`
+  (anche `;` o tab, e i mazzi di CrossPet). Cartella `/flashcards`, oppure un file `<mazzo>.flashcards.txt` nella
+  radice, che si può caricare dal portale Wi-Fi.
+- **Statistiche** — pagine e minuti di oggi, serie di giorni, totale, pagine degli ultimi sette giorni.
+
+In Impostazioni: **Schermata di blocco** — copertina del libro, immagini a rotazione dalla cartella `/sleep`
+(BMP, PNG, JPEG; anche `sleep*.bmp` nella radice), oppure il poster.
+
+Sotto il cofano:
+
+- La posizione di lettura va sulla scheda dopo il refresh del pannello, statistiche e Cripta ogni 10 pagine: un cambio
+  pagina non aspetta più quattro scritture.
+- A pagina ferma la CPU scende a 10 MHz (prima 80).
+- Il capitolo successivo viene impaginato mentre leggi: il cambio capitolo è un cambio pagina qualsiasi.
+- I font incorporati sono ridotti agli alfabeti usati (`scripts/subset_fonts.py`): l'immagine passa da 6,1 a 3,8 MB,
+  stessa resa pixel per pixel.
+
+Verifica senza dispositivo: `inkling-sim --check`, `--walk`, `--tools`, `--selftest` (vedi sotto).
+
 ## Galleria Schermate (Rendering 1:1 da Framebuffer 528×792)
 
 ### Cyber-Desk Stand, Meteo & Home Command Center
@@ -132,5 +166,11 @@ Il simulatore esegue esattamente lo stesso codice `InklingCore` + `FreeInkBook` 
 ```sh
 cmake -S sim -B build/sim
 cmake --build build/sim
-./build/sim/inkling-sim <cartella-sd> <cartella-output-png>
+./build/sim/inkling-sim <cartella-sd> <cartella-output-png>      # giro di tutte le schermate
+./build/sim/inkling-sim --check <cartella-sd>                    # sfoglia ogni libro, verticale e orizzontale
+./build/sim/inkling-sim --walk <cartella-sd> <0|1|2> [capitoli]  # impronta di ogni pagina; 1 e 2 con il capitolo
+                                                                 # successivo impaginato in anticipo (devono coincidere)
+./build/sim/inkling-sim --tools <cartella-sd> <output> [libro]   # segnalibri, ritagli, dizionario, note, flashcard
+./build/sim/inkling-sim --selftest <cartella-sd>                 # dizionario, flashcard, statistiche
 ```
+La cartella che fa da scheda viene scritta (cache, segni, ritagli): usane una copia.
