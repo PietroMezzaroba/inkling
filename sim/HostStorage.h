@@ -16,6 +16,10 @@ class HostStorage final : public inkling::Storage {
   int32_t readFile(const char* path, void* dst, uint32_t cap) override;
   bool writeFile(const char* path, const void* data, uint32_t len) override;
   bool mkdirs(const char* path) override;
+  bool appendFile(const char* path, const void* data, uint32_t len) override;
+  int32_t readFileAt(const char* path, uint32_t offset, void* dst, uint32_t cap) override;
+  int64_t fileSize(const char* path) override;
+  bool removeFile(const char* path) override;
   freeink::book::BookSource* openBook(const char* path) override;
   void closeBook() override;
   freeink::book::CacheStorage* cacheAt(const char* dir) override;

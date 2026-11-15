@@ -32,6 +32,15 @@ class Storage {
   virtual bool writeFile(const char* path, const void* data, uint32_t len) = 0;
   virtual bool mkdirs(const char* path) = 0;
 
+  // For files too big for readFile (decks, dictionaries) and for the notes the
+  // user reads back on a computer. appendFile creates the file if missing;
+  // readFileAt returns the byte count (short at end of file) or -1; fileSize
+  // returns -1 when the file does not exist.
+  virtual bool appendFile(const char* path, const void* data, uint32_t len) = 0;
+  virtual int32_t readFileAt(const char* path, uint32_t offset, void* dst, uint32_t cap) = 0;
+  virtual int64_t fileSize(const char* path) = 0;
+  virtual bool removeFile(const char* path) = 0;
+
   // One book is open at a time: openBook() re-points a single source object.
   virtual freeink::book::BookSource* openBook(const char* path) = 0;
   virtual void closeBook() = 0;

@@ -110,7 +110,20 @@ class BookReader {
   }
 
   BookStatus prepare() { return ensureChapter(); }
+  // Draws the current page. The position is NOT written to the card here:
+  // call saveProgress() when the panel is idle (it only writes what changed).
   BookStatus render(const freeink::book::FrameTarget& frame);
+  void saveProgress(bool forceSummary = false);
+
+  // Paginates the NEXT chapter ahead of time, a page or so per call, so that
+  // crossing a chapter boundary is an ordinary page turn. It borrows the same
+  // arenas as rendering (and the framebuffer as parse buffer), so the page on
+  // the panel must not be needed from the framebuffer afterwards, and any
+  // other call on the reader drops unfinished work.
+  bool prebuildWanted();
+  bool prebuildStep();  // true while more work remains
+  void prebuildCancel();
+  bool prebuildActive() const { return preSpine_ >= 0; }
 
   // Page turns. `chapterFlipped` (optional) is set true when advancing across a chapter boundary.
   bool nextPage(bool* chapterFlipped = nullptr);
@@ -160,8 +173,8 @@ class BookReader {
   void applyLayout(const ReaderLayout& layout);
   BookStatus ensureChapter();
   BookStatus layoutChapter(const char* cacheName);
-  void saveProgress(bool forceSummary = false);
   void loadProgress();
+  void prebuildEnd(bool keep);
   bool resolveCoverEntry(freeink::book::ZipEntry* out);
   void ensureCoverCache();
 
@@ -203,6 +216,15 @@ class BookReader {
   uint32_t page_ = 0;
   bool wantLastPage_ = false;
   int8_t travel_ = 1;
+  // Background pagination of the next chapter.
+  freeink::book::ChapterLayoutSession preSession_;
+  freeink::book::PageCacheWriter preWriter_;
+  char preName_[48] = {};
+  int32_t preSpine_ = -1;        // chapter being built, -1 = none
+  int32_t preSettledSpine_ = -1; // chapter that needs no (more) attempts
+  int32_t preAbortSpine_ = -1;
+  uint8_t preAborts_ = 0;
+  size_t preIndexMark_ = 0;
   int32_t lastSavedSpine_ = -1;
   uint32_t lastSavedCharStart_ = 0xFFFFFFFFu;
   uint8_t lastSavedPct_ = 0xFFu;

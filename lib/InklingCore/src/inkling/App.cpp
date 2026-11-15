@@ -368,7 +368,42 @@ void InklingApp::update() {
 
 void InklingApp::shutdown() {
   if (reader_) reader_->close();
+  progressDirty_ = false;
   savePrefs();
+  saveStats();
+}
+
+namespace {
+// The next chapter is paginated only after the reader has settled on a page.
+constexpr uint32_t kPrebuildAfterIdleMs = 1500;
+// Statistics reach the card every this many pages (and when the book closes
+// or the device goes to sleep), not on every page turn.
+constexpr uint8_t kStatsSavePages = 10;
+}  // namespace
+
+bool InklingApp::hasIdleWork(uint32_t idleMs) {
+  if (progressDirty_) return true;
+  if (statsDirty_ && pagesSinceStatsSave_ >= kStatsSavePages) return true;
+  return mode_ == Mode::Reader && idleMs >= kPrebuildAfterIdleMs && reader_ && reader_->prebuildWanted();
+}
+
+bool InklingApp::idleTick(uint32_t idleMs) {
+  if (progressDirty_) {
+    progressDirty_ = false;
+    if (reader_) reader_->saveProgress();
+    return true;
+  }
+  if (statsDirty_ && pagesSinceStatsSave_ >= kStatsSavePages) {
+    saveStats();
+    return true;
+  }
+  if (mode_ == Mode::Reader && idleMs >= kPrebuildAfterIdleMs && reader_ && reader_->prebuildWanted()) {
+    // The build borrows the framebuffer: whatever is drawn next over the page
+    // (the reader menu) has to draw the page again first.
+    needsReaderBackdrop_ = true;
+    return reader_->prebuildStep();
+  }
+  return false;
 }
 
 void InklingApp::loadPrefs() {
@@ -404,7 +439,13 @@ void InklingApp::savePrefs() {
       {0, 0},
   };
   storage_.writeFile(kPrefsPath, &p, sizeof(p));
+}
 
+void InklingApp::saveStats() {
+  if (!statsDirty_) return;
+  statsDirty_ = false;
+  pagesSinceStatsSave_ = 0;
+  rpg_.save(storage_);
   const ReadingStatsRecord rs{
       kReadingStatsMagic,
       totalPagesRead_,
@@ -434,8 +475,8 @@ void InklingApp::recordPageRead() {
   }
   ++dailyPages_;
   rpg_.grantReadingBonus(1);
-  rpg_.save(storage_);
-  savePrefs();
+  statsDirty_ = true;
+  if (pagesSinceStatsSave_ < 255) ++pagesSinceStatsSave_;
 }
 
 ReaderLayout InklingApp::currentLayout() const {
@@ -544,7 +585,9 @@ bool InklingApp::openBook(const char* path, bool resuming) {
 void InklingApp::closeBook() {
   applyPendingLayout();  // keep the user's last typography change
   if (reader_) reader_->close();
+  progressDirty_ = false;
   savePrefs();
+  saveStats();
   storage_.writeFile(kLastBookPath, "", 0);
   library_.refreshSummaries(storage_);
   showHome();
@@ -1343,6 +1386,7 @@ void InklingApp::readerScreen(UiApp::ScreenType& screen, void* user) {
 
   clearScreen();
   self.lastRenderStatus_ = self.reader_->render(self.frame_);
+  self.progressDirty_ = true;  // written by idleTick(), after the panel refresh
   self.needsReaderBackdrop_ = false;
   if (self.resumePending_ && self.lastRenderStatus_ == freeink::book::BookStatus::Ok) {
     self.resumePending_ = false;

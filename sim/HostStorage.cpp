@@ -47,6 +47,30 @@ bool HostStorage::mkdirs(const char* path) {
   return true;
 }
 
+bool HostStorage::appendFile(const char* path, const void* data, uint32_t len) {
+  FILE* f = fopen(hostPath(path).c_str(), "ab");
+  if (!f) return false;
+  const bool ok = fwrite(data, 1, len, f) == len;
+  return fclose(f) == 0 && ok;
+}
+
+int32_t HostStorage::readFileAt(const char* path, uint32_t offset, void* dst, uint32_t cap) {
+  FILE* f = fopen(hostPath(path).c_str(), "rb");
+  if (!f) return -1;
+  int32_t n = -1;
+  if (fseek(f, static_cast<long>(offset), SEEK_SET) == 0) n = static_cast<int32_t>(fread(dst, 1, cap, f));
+  fclose(f);
+  return n;
+}
+
+int64_t HostStorage::fileSize(const char* path) {
+  struct stat st;
+  if (stat(hostPath(path).c_str(), &st) != 0 || S_ISDIR(st.st_mode)) return -1;
+  return static_cast<int64_t>(st.st_size);
+}
+
+bool HostStorage::removeFile(const char* path) { return ::remove(hostPath(path).c_str()) == 0; }
+
 freeink::book::BookSource* HostStorage::openBook(const char* path) {
   closeBook();
   source_.file = fopen(hostPath(path).c_str(), "rb");

@@ -74,6 +74,13 @@ class InklingApp {
   void update();
   void shutdown();
 
+  // Work that waits for a pause: saving the reading position and the reading
+  // statistics, and paginating the next chapter. The platform calls idleTick()
+  // when the panel is idle and no key is down; each call is one short slice
+  // and returns true while more remains. `idleMs` = time since the last key.
+  bool hasIdleWork(uint32_t idleMs);
+  bool idleTick(uint32_t idleMs);
+
   Mode mode() const { return mode_; }
   void showDiagnostic();
   void refreshDiagnostic() {
@@ -154,6 +161,7 @@ class InklingApp {
   void runSettingItem(int item);
   void loadPrefs();
   void savePrefs();
+  void saveStats();
   void recordPageRead();
   void setResumeLock(bool locked);
   void enterMode(Mode mode, UiApp::ScreenFn fn, void* user, freeink::ui::RefreshHint hint);
@@ -203,6 +211,9 @@ class InklingApp {
   bool resumePending_ = false;
   bool cursorOnlyRedraw_ = false;
   bool needsReaderBackdrop_ = false;
+  bool progressDirty_ = false;  // page shown but position not yet on the card
+  bool statsDirty_ = false;
+  uint8_t pagesSinceStatsSave_ = 0;
   bool settingsFromReader_ = false;
   bool diagnosticFromSettings_ = false;
 };

@@ -23,7 +23,11 @@ int32_t SdStorage::readFile(const char* path, void* dst, uint32_t cap) {
 bool SdStorage::writeFile(const char* path, const void* data, uint32_t len) {
   // Write a temp file, then swap it in: a power cut mid-write leaves the old
   // file (or the temp), never a half-written one under the real name.
-  char tmp[128];
+  if (aux_ && strcmp(path, auxPath_) == 0) {
+    aux_.close();
+    auxPath_[0] = '\0';
+  }
+  char tmp[136];
   snprintf(tmp, sizeof(tmp), "%s.tmp", path);
   FsFile f = SdMan.open(tmp, O_RDWR | O_CREAT | O_TRUNC);
   if (!f) return false;
@@ -35,6 +39,44 @@ bool SdStorage::writeFile(const char* path, const void* data, uint32_t len) {
 }
 
 bool SdStorage::mkdirs(const char* path) { return SdMan.exists(path) || SdMan.mkdir(path, true); }
+
+bool SdStorage::appendFile(const char* path, const void* data, uint32_t len) {
+  if (aux_ && strcmp(path, auxPath_) == 0) {
+    aux_.close();
+    auxPath_[0] = '\0';
+  }
+  FsFile f = SdMan.open(path, O_RDWR | O_CREAT | O_AT_END);
+  if (!f) return false;
+  const bool ok = f.write(static_cast<const uint8_t*>(data), len) == len;
+  f.close();
+  return ok;
+}
+
+int32_t SdStorage::readFileAt(const char* path, uint32_t offset, void* dst, uint32_t cap) {
+  if (!aux_ || strcmp(path, auxPath_) != 0) {
+    if (aux_) aux_.close();
+    auxPath_[0] = '\0';
+    aux_ = SdMan.open(path, O_RDONLY);
+    if (!aux_) return -1;
+    snprintf(auxPath_, sizeof(auxPath_), "%s", path);
+  }
+  if (!aux_.seekSet(offset)) return -1;
+  return static_cast<int32_t>(aux_.read(dst, cap));
+}
+
+int64_t SdStorage::fileSize(const char* path) {
+  FsFile f = SdMan.open(path, O_RDONLY);
+  if (!f) return -1;
+  return static_cast<int64_t>(f.fileSize());
+}
+
+bool SdStorage::removeFile(const char* path) {
+  if (aux_ && strcmp(path, auxPath_) == 0) {
+    aux_.close();
+    auxPath_[0] = '\0';
+  }
+  return SdMan.remove(path);
+}
 
 freeink::book::BookSource* SdStorage::openBook(const char* path) {
   closeBook();

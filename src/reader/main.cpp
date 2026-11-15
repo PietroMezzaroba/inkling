@@ -108,6 +108,8 @@ constexpr unsigned long kOtherSlotHoldMs = 3000;
 constexpr unsigned long kBootEscapeSampleMs = 300;
 // How often the clock, battery and IMU are re-read while idle.
 constexpr unsigned long kStatusPollMs = 30000;
+// CPU clock while a page is being read (nothing to compute, keys polled).
+constexpr uint32_t kIdleCpuMhz = 10;
 
 EInkDisplay* display = nullptr;
 InputManager input;
@@ -163,12 +165,18 @@ unsigned long lastImuMs = 0;
 unsigned long lastActivityMs = 0;
 bool cpuTurboActive = true;
 
-void ensureCpuTurbo() {
-  lastActivityMs = millis();
+// Full speed for anything that computes or talks SPI (rendering, the SD card):
+// below 80 MHz the bus clock follows the CPU clock.
+void cpuFull() {
   if (!cpuTurboActive) {
     setCpuFrequencyMhz(160);
     cpuTurboActive = true;
   }
+}
+
+void ensureCpuTurbo() {
+  lastActivityMs = millis();
+  cpuFull();
 }
 
 const char* panelName() {
@@ -237,6 +245,7 @@ void renderNow() {
 RTC_DATA_ATTR bool rtcDeviceWasSleeping = false;
 
 [[noreturn]] void powerOff() {
+  cpuFull();
   LOG("power off");
   display->completeDisplay();
   app->shutdown();  // reading position is already saved per page; this closes files
@@ -642,7 +651,21 @@ void loop() {
     if (pollStatus()) app->refreshDiagnostic();
   }
 
+  if (ui->invalidated()) cpuFull();
   app->update();
+
+  // Deferred work (position and statistics to the card, the next chapter's
+  // pagination), one slice per pass and only while no key is down or bouncing,
+  // so a press is never stuck behind it.
+  bool idleWorked = false;
+  if (!display->refreshBusy() && buttonQueueHead == buttonQueueTail && !input.isDebouncePending() &&
+      !input.isPressed(InputManager::BTN_POWER)) {
+    const uint32_t idleMs = static_cast<uint32_t>(millis() - lastActivityMs);
+    if (app->hasIdleWork(idleMs)) {
+      cpuFull();
+      idleWorked = app->idleTick(idleMs);
+    }
+  }
 
   // Inactivity auto-sleep (configurable in Settings):
   const unsigned long autoSleepTimeoutMs = app->settings().autoSleepTimeoutMs();
@@ -652,16 +675,20 @@ void loop() {
     powerOff();
   }
 
-  // Smart Dynamic Power Management:
-  // Stay at 160 MHz + 2 ms polling for 3 seconds after any button press or
-  // while the panel is refreshing. When quietly reading a page (idle >= 3s),
-  // drop to 80 MHz + 15 ms polling (cutting idle MCU power by >55%), and
-  // instantaneously boost back to 160 MHz on the next button press!
+  // Power: 160 MHz with 2 ms polling for 3 s after a key, while the panel
+  // refreshes and while there is deferred work. Then the CPU drops to 10 MHz
+  // (the clock CrossPoint idles this board at) and the keys are polled every
+  // 15 ms. A key change needs two matching samples to register, so the moment
+  // one sample differs the next comes 2 ms later, at full speed.
+  if (idleWorked) return;
   if (display->refreshBusy() || (millis() - lastActivityMs < 3000)) {
+    delay(2);
+  } else if (input.isDebouncePending()) {
+    cpuFull();
     delay(2);
   } else {
     if (cpuTurboActive) {
-      setCpuFrequencyMhz(80);
+      setCpuFrequencyMhz(kIdleCpuMhz);
       cpuTurboActive = false;
     }
     delay(15);

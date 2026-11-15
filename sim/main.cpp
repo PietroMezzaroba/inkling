@@ -7,7 +7,9 @@
 
 #include <FreeInkUIDisplayTarget.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -376,9 +378,75 @@ int runCheck(const std::string& cardDir) {
   return failures ? 1 : 0;
 }
 
+// Pages every book through its first chapters and prints a checksum of each
+// chapter's rendered pages. mode 0: plain; 1: the next chapter is paginated
+// ahead while "idle" on every page; 2: the same, but interrupted after two
+// slices by the next page turn. The three outputs must be identical.
+int runWalk(const std::string& cardDir, int mode) {
+  Fonts fonts;
+  sim::HostStorage storage(cardDir);
+  inkling::BookReader reader(storage, readerMemory);
+  reader.setIndexBuffer(readerIndex, sizeof(readerIndex));
+  fonts.registerAll(reader, glyphsRegular, sizeof(glyphsRegular), glyphsItalic, sizeof(glyphsItalic));
+  Canvas canvas;
+  inkling::ui::bindInklingFonts(canvas.target);
+  reader.setParseBuffer(canvas.fb.data(), canvas.fb.size());
+  const auto frame = frameFor(canvas);
+  static inkling::Library library;
+  library.scan(storage);
+  for (int i = 0; i < library.count(); ++i) {
+    inkling::ReaderLayout layout;
+    auto st = reader.open(library.at(i).path, layout);
+    if (st != freeink::book::BookStatus::Ok) {
+      std::printf("ERR open %s\n", library.at(i).name);
+      continue;
+    }
+    reader.jumpToChapter(0);
+    uint32_t hash = 2166136261u, pages = 0;
+    uint16_t spine = 0;
+    auto flushChapter = [&] {
+      std::printf("%-28.28s spine %3u  %4u pages  %08x\n", library.at(i).name, spine, pages, hash);
+      hash = 2166136261u;
+      pages = 0;
+    };
+    while (true) {
+      std::fill(canvas.fb.begin(), canvas.fb.end(), 0xFF);  // as readerScreen does
+      st = reader.render(frame);
+      if (st != freeink::book::BookStatus::Ok) {
+        std::printf("ERR render %s\n", freeink::book::bookStatusName(st));
+        break;
+      }
+      if (reader.currentSpine() != spine) {
+        flushChapter();
+        spine = reader.currentSpine();
+        if (spine >= 14) break;
+      }
+      for (uint8_t b : canvas.fb) hash = (hash ^ b) * 16777619u;
+      ++pages;
+      reader.saveProgress();
+      if (mode == 1) {
+        while (reader.prebuildStep()) {
+        }
+      } else if (mode == 2) {
+        reader.prebuildStep();
+        reader.prebuildStep();
+      }
+      if (!reader.nextPage()) {
+        flushChapter();
+        break;
+      }
+    }
+    reader.close();
+  }
+  std::printf("arena peaks: scratch %zu, index %zu, parse %zu\n", reader.scratchHighWater(), reader.indexHighWater(),
+              reader.parseHighWater());
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 4 && std::string(argv[1]) == "--walk") return runWalk(argv[2], std::atoi(argv[3]));
   if (argc == 3 && std::string(argv[1]) == "--check") return runCheck(argv[2]);
   if (argc == 3) return runTour(argv[1], argv[2]);
   std::fprintf(stderr, "usage: %s <card-dir> <out-dir> | --check <card-dir>\n", argv[0]);

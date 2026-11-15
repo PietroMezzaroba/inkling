@@ -159,6 +159,9 @@ void BookReader::applyLayout(const ReaderLayout& layout) {
 
 BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
   close();
+  preSettledSpine_ = -1;
+  preAbortSpine_ = -1;
+  preAborts_ = 0;
 
   source_ = storage_.openBook(path);
   if (!source_) return BookStatus::IoError;
@@ -239,17 +242,20 @@ BookStatus BookReader::open(const char* path, const ReaderLayout& layout) {
 
 BookStatus BookReader::relayout(const ReaderLayout& layout) {
   if (!open_) return BookStatus::NotFound;
+  prebuildCancel();
   const uint32_t prevGen = generation_;
   const uint8_t prevFam = activeFamily_;
   applyLayout(layout);
   if (generation_ != prevGen || activeFamily_ != prevFam) {
     loadedSpine_ = -1;
     wantLastPage_ = false;
+    preSettledSpine_ = -1;
   }
   return ensureChapter();
 }
 
 void BookReader::close() {
+  prebuildCancel();
   if (open_) saveProgress(true);
   if (source_) storage_.closeBook();
   open_ = false;
@@ -289,6 +295,7 @@ BookStatus BookReader::layoutChapter(const char* cacheName) {
 }
 
 BookStatus BookReader::ensureChapter() {
+  prebuildCancel();
   for (uint16_t guard = 0; guard <= spineCount_; ++guard) {
     if (loadedSpine_ != pos_.spine) {
       char name[48];
@@ -360,8 +367,114 @@ BookStatus BookReader::render(const freeink::book::FrameTarget& frame) {
     INKLING_LOG("render spine %u page %u/%u: %s", pos_.spine, static_cast<unsigned>(page_),
                 static_cast<unsigned>(count), freeink::book::bookStatusName(st));
   }
-  saveProgress();
   return st;
+}
+
+// ---------------------------------------------------------------------------
+// Background pagination of the next chapter
+// ---------------------------------------------------------------------------
+
+namespace {
+// A chapter this big does not finish between two page turns: leave it to the
+// ordinary "layout when you get there" path.
+constexpr uint32_t kPrebuildMaxBytes = 400u * 1024u;
+}  // namespace
+
+bool BookReader::prebuildWanted() {
+  if (preSpine_ >= 0) return true;
+  if (!open_ || isText_ || !cache_ || loadedSpine_ != pos_.spine) return false;
+  const int32_t next = static_cast<int32_t>(pos_.spine) + 1;
+  if (next >= static_cast<int32_t>(spineCount_) || preSettledSpine_ == next) return false;
+  char name[48];
+  freeink::book::pageCacheName(static_cast<uint16_t>(next), generation_, name, sizeof(name));
+  if (cache_->exists(name) || catalog_.spineSize(static_cast<size_t>(next)) > kPrebuildMaxBytes) {
+    preSettledSpine_ = next;
+    return false;
+  }
+  return true;
+}
+
+bool BookReader::prebuildStep() {
+  if (preSpine_ < 0) {
+    if (!prebuildWanted()) return false;
+    const uint16_t next = static_cast<uint16_t>(pos_.spine + 1);
+    freeink::book::pageCacheName(next, generation_, preName_, sizeof(preName_));
+    static char href[256];
+    ZipEntry entry;
+    BookStatus st = catalog_.spineHref(next, href, sizeof(href));
+    if (st == BookStatus::Ok) st = catalog_.spineEntry(next, &entry);
+    if (st != BookStatus::Ok) {
+      preSettledSpine_ = next;
+      return false;
+    }
+    INKLING_LOG("prebuild spine %u", next);
+    // The open chapter keeps its index at the bottom of index_; the writer's
+    // goes above it and is released when the build ends.
+    preIndexMark_ = index_.mark();
+    scratch_.reset();
+    parse_.reset();
+    parseUsed_ = parseUsed_ || parse_.capacity() > 0;
+    preSpine_ = next;
+    if (!preWriter_.begin(*cache_, preName_, generation_, index_)) {
+      prebuildEnd(false);
+      preSettledSpine_ = next;
+      return false;
+    }
+    st = preSession_.begin(*source_, &catalog_.zip(), *source_, entry, href, params_, scratch_, preWriter_,
+                           parse_.capacity() ? &parse_ : nullptr);
+    if (st != BookStatus::Ok) {
+      prebuildEnd(false);
+      preSettledSpine_ = next;
+      return false;
+    }
+    return true;
+  }
+
+  const BookStatus st = preSession_.step(1);
+  if (st != BookStatus::Ok || preWriter_.failed()) {
+    INKLING_LOG("prebuild spine %d failed: %s", static_cast<int>(preSpine_), freeink::book::bookStatusName(st));
+    const int32_t spine = preSpine_;
+    prebuildEnd(false);
+    preSettledSpine_ = spine;  // the foreground path will report the error, if any
+    return false;
+  }
+  if (!preSession_.done()) return true;
+  const int32_t spine = preSpine_;
+  prebuildEnd(true);
+  preSettledSpine_ = spine;
+  return false;
+}
+
+void BookReader::prebuildCancel() {
+  if (preSpine_ < 0) return;
+  // Interrupted by the reader: retry at the next pause, but not forever.
+  if (preAbortSpine_ != preSpine_) {
+    preAbortSpine_ = preSpine_;
+    preAborts_ = 0;
+  }
+  if (++preAborts_ >= 2) preSettledSpine_ = preSpine_;
+  prebuildEnd(false);
+}
+
+void BookReader::prebuildEnd(bool keep) {
+  if (preSpine_ < 0) return;
+  bool written = false;
+  if (keep) {
+    preWriter_.setTotalChars(preSession_.totalChars());
+    written = preWriter_.finish();
+    INKLING_LOG("prebuild spine %d: %u pages%s", static_cast<int>(preSpine_),
+                static_cast<unsigned>(preWriter_.pageCount()), written ? "" : " (write failed)");
+  } else {
+    // finish() is the only way to close the writer's stream; the result is
+    // then removed so a half chapter is never mistaken for a whole one.
+    preWriter_.finish();
+  }
+  preSession_.abort();
+  if (!written && cache_) cache_->remove(preName_);
+  scratch_.reset();
+  parse_.reset();
+  index_.release(preIndexMark_);
+  preSpine_ = -1;
 }
 
 bool BookReader::nextPage(bool* chapterFlipped) {
