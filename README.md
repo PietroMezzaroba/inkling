@@ -145,6 +145,10 @@ pio run -e x3-updater
 cp .pio/build/x3-updater/firmware.bin assets/updater.bin
 pio run -e x3
 ```
+`assets/updater.bin` non è nel repository: è il prodotto del primo comando e viene incorporato nel lettore.
+Reti Wi-Fi e token OTA predefiniti si mettono in `src/common/PrivateConfig.local.h` (ignorato da git; i nomi delle
+macro sono in `PrivateConfig.h`) oppure in `/.inkling/wifi.txt` sulla scheda. Senza un token l'updater rifiuta i
+caricamenti.
 
 ### 2. Aggiornamento Wireless via Wi-Fi (`scripts/ota.sh`)
 Configura sulla microSD il file `/.inkling/wifi.txt`:

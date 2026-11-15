@@ -17,3 +17,10 @@
 #ifndef INKLING_DEFAULT_PASS_2
 #define INKLING_DEFAULT_PASS_2 ""
 #endif
+
+// Token the updater accepts uploads with when /.inkling/wifi.txt has none
+// (it must match .ota-token on the computer). Empty: uploads are refused
+// until the card names one.
+#ifndef INKLING_DEFAULT_TOKEN
+#define INKLING_DEFAULT_TOKEN ""
+#endif

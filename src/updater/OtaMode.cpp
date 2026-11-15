@@ -1071,8 +1071,10 @@ bool loadConfig(Config& out) {
     addNetwork(INKLING_DEFAULT_SSID_2, INKLING_DEFAULT_PASS_2);
   }
 
+  // No token on the card: the one from PrivateConfig.local.h, if any. With
+  // neither, loadConfig() fails and nothing can be uploaded.
   if (out.token[0] == '\0') {
-    snprintf(out.token, sizeof(out.token), "1428b87619e23b52529fa0d9a200705b");
+    snprintf(out.token, sizeof(out.token), "%s", INKLING_DEFAULT_TOKEN);
   }
 
   // Auto-sync / create /.inkling/wifi.txt on microSD

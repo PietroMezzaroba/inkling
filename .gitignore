@@ -16,3 +16,6 @@ dependencies.lock
 CMakeLists.txt
 !sim/CMakeLists.txt
 sdkconfig.*
+# The updater image embedded in the reader: a build product, and it carries
+# the Wi-Fi defaults of PrivateConfig.local.h. scripts/ota.sh regenerates it.
+assets/updater.bin
