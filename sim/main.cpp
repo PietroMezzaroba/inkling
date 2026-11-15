@@ -75,15 +75,22 @@ std::vector<uint8_t> loadFile(const std::string& path) {
   return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
 }
 
+// The firmware's embedded fonts by default; INKLING_FONT_DIR in the environment
+// points at another set (the unsubsetted originals, to compare renderings).
+std::string fontDir() {
+  const char* env = std::getenv("INKLING_FONT_DIR");
+  return env && env[0] ? env : INKLING_FONT_DIR;
+}
+
 struct Fonts {
-  std::vector<uint8_t> notoSerifReg = loadFile(std::string(INKLING_FONT_DIR) + "/NotoSerif-Regular.ttf");
-  std::vector<uint8_t> notoSerifIt = loadFile(std::string(INKLING_FONT_DIR) + "/NotoSerif-Italic.ttf");
-  std::vector<uint8_t> notoSansReg = loadFile(std::string(INKLING_FONT_DIR) + "/NotoSans-Regular.ttf");
-  std::vector<uint8_t> notoSansIt = loadFile(std::string(INKLING_FONT_DIR) + "/NotoSans-Italic.ttf");
-  std::vector<uint8_t> alegreyaReg = loadFile(std::string(INKLING_FONT_DIR) + "/Alegreya-Regular.ttf");
-  std::vector<uint8_t> alegreyaIt = loadFile(std::string(INKLING_FONT_DIR) + "/Alegreya-Italic.ttf");
-  std::vector<uint8_t> dyslexicReg = loadFile(std::string(INKLING_FONT_DIR) + "/OpenDyslexic-Regular.otf");
-  std::vector<uint8_t> dyslexicIt = loadFile(std::string(INKLING_FONT_DIR) + "/OpenDyslexic-Italic.otf");
+  std::vector<uint8_t> notoSerifReg = loadFile(fontDir() + "/NotoSerif-Regular.ttf");
+  std::vector<uint8_t> notoSerifIt = loadFile(fontDir() + "/NotoSerif-Italic.ttf");
+  std::vector<uint8_t> notoSansReg = loadFile(fontDir() + "/NotoSans-Regular.ttf");
+  std::vector<uint8_t> notoSansIt = loadFile(fontDir() + "/NotoSans-Italic.ttf");
+  std::vector<uint8_t> alegreyaReg = loadFile(fontDir() + "/Alegreya-Regular.ttf");
+  std::vector<uint8_t> alegreyaIt = loadFile(fontDir() + "/Alegreya-Italic.ttf");
+  std::vector<uint8_t> dyslexicReg = loadFile(fontDir() + "/OpenDyslexic-Regular.otf");
+  std::vector<uint8_t> dyslexicIt = loadFile(fontDir() + "/OpenDyslexic-Italic.otf");
 
   void registerAll(inkling::BookReader& reader, uint8_t* regCache, size_t regCap, uint8_t* itCache, size_t itCap) {
     reader.initFonts(notoSerifReg.data(), static_cast<uint32_t>(notoSerifReg.size()), notoSerifIt.data(),
@@ -382,7 +389,7 @@ int runCheck(const std::string& cardDir) {
 // chapter's rendered pages. mode 0: plain; 1: the next chapter is paginated
 // ahead while "idle" on every page; 2: the same, but interrupted after two
 // slices by the next page turn. The three outputs must be identical.
-int runWalk(const std::string& cardDir, int mode) {
+int runWalk(const std::string& cardDir, int mode, int maxSpine, int family) {
   Fonts fonts;
   sim::HostStorage storage(cardDir);
   inkling::BookReader reader(storage, readerMemory);
@@ -396,6 +403,7 @@ int runWalk(const std::string& cardDir, int mode) {
   library.scan(storage);
   for (int i = 0; i < library.count(); ++i) {
     inkling::ReaderLayout layout;
+    layout.fontFamily = static_cast<uint8_t>(family);
     auto st = reader.open(library.at(i).path, layout);
     if (st != freeink::book::BookStatus::Ok) {
       std::printf("ERR open %s\n", library.at(i).name);
@@ -419,7 +427,7 @@ int runWalk(const std::string& cardDir, int mode) {
       if (reader.currentSpine() != spine) {
         flushChapter();
         spine = reader.currentSpine();
-        if (spine >= 14) break;
+        if (spine >= maxSpine) break;
       }
       for (uint8_t b : canvas.fb) hash = (hash ^ b) * 16777619u;
       ++pages;
@@ -446,7 +454,10 @@ int runWalk(const std::string& cardDir, int mode) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc == 4 && std::string(argv[1]) == "--walk") return runWalk(argv[2], std::atoi(argv[3]));
+  if (argc >= 4 && std::string(argv[1]) == "--walk") {
+    return runWalk(argv[2], std::atoi(argv[3]), argc >= 5 ? std::atoi(argv[4]) : 14,
+                   argc >= 6 ? std::atoi(argv[5]) : 0);
+  }
   if (argc == 3 && std::string(argv[1]) == "--check") return runCheck(argv[2]);
   if (argc == 3) return runTour(argv[1], argv[2]);
   std::fprintf(stderr, "usage: %s <card-dir> <out-dir> | --check <card-dir>\n", argv[0]);
